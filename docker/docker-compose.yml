@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  gnn-experiments:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: gnn-adversarial-nids:latest
+    container_name: gnn_experiments
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ..:/workspace
+      - ../data:/workspace/data
+      - ../results:/workspace/results
+      - ../logs:/workspace/logs
+    ports:
+      - '8888:8888'
+      - '6006:6006'
+    shm_size: '16gb'
+    stdin_open: true
+    tty: true
+    command: /bin/bash
