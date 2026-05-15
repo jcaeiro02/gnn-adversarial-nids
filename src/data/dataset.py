@@ -26,6 +26,8 @@ class NetworkFlowDataset(InMemoryDataset):
     Manages loading, processing, and caching of flow-centric graph datasets.
     """
 
+    PREPROCESSOR_STATE_FILE = "preprocessor_state.pkl"
+
     def __init__(
         self,
         root: str = "data/graphs",
@@ -34,6 +36,7 @@ class NetworkFlowDataset(InMemoryDataset):
         transform=None,
         pre_transform=None,
         rebuild: bool = False,
+        window_size: int = 1000,
     ):
         """Initialize the dataset.
 
@@ -48,22 +51,35 @@ class NetworkFlowDataset(InMemoryDataset):
         self.name = name
         self.split = split
         self.rebuild = rebuild
+        # Store provided root path so properties can be used before
+        # PyTorch-Geometric's InMemoryDataset.__init__ sets up `self.root`.
+        self._root_path = root
+        self.window_size = window_size
         self.data_list = []
         self.statistics = {}
 
+        if self.rebuild:
+            self._remove_processed_files()
+
         super().__init__(root, transform, pre_transform)
 
-        logger.info(f"NetworkFlowDataset initialized: name={name}, split={split}")
+        # Ensure processed graph list is loaded after initialization
+        self._load_processed_graphs()
+
+        logger.info(
+            f"NetworkFlowDataset initialized: name={name}, split={split}, "
+            f"window_size={window_size}, rebuild={rebuild}"
+        )
 
     @property
     def raw_dir(self) -> str:
         """Return raw data directory path."""
-        return os.path.join(self.root, "raw")
+        return os.path.join(self._root_path, "raw")
 
     @property
     def processed_dir(self) -> str:
         """Return processed data directory path."""
-        return os.path.join(self.root, "processed")
+        return os.path.join(self._root_path, "processed")
 
     @property
     def raw_file_names(self) -> List[str]:
@@ -77,7 +93,7 @@ class NetworkFlowDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self) -> List[str]:
-        """Return list of processed file names."""
+        """Return list of split-specific processed file names."""
         return [
             f"data_{self.split}.pt",
             f"statistics_{self.split}.pkl",
@@ -114,23 +130,60 @@ class NetworkFlowDataset(InMemoryDataset):
         # Load and preprocess data
         logger.info("Loading and preprocessing raw data...")
         preprocessor = NSLKDDPreprocessor()
-        df = preprocessor.load_data(raw_file)
-        X, y = preprocessor.preprocess(df, fit=True)
+        if self.split == "train":
+            df = preprocessor.load_data(raw_file)
+            X, y = preprocessor.preprocess(df, fit=True)
+        else:
+            preprocessor_state_path = os.path.join(
+                self.processed_dir, self.PREPROCESSOR_STATE_FILE
+            )
+            if not os.path.exists(preprocessor_state_path):
+                raise FileNotFoundError(
+                    f"Preprocessor state not found: {preprocessor_state_path}. "
+                    "Process the train split first so the test split can reuse the fitted preprocessor."
+                )
+            preprocessor.load_preprocessed(preprocessor_state_path)
+            df = preprocessor.load_data(raw_file)
+            X, y = preprocessor.preprocess(df, fit=False)
 
-        # Build graph
-        logger.info("Building flow-centric graph...")
+        # Save train preprocessor state
+        Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
+        if self.split == "train":
+            state_path = os.path.join(
+                self.processed_dir,
+                self.PREPROCESSOR_STATE_FILE,
+            )
+            state = {
+                "scaler": preprocessor.scaler,
+                "label_encoders": preprocessor.label_encoders,
+                "feature_names": preprocessor.feature_names,
+            }
+            with open(state_path, "wb") as f:
+                pickle.dump(state, f)
+            logger.info(f"Saved preprocessor state to {state_path}")
+
+        # Build graphs using windowing
+        logger.info("Building flow-centric graphs with windowing...")
         builder = FlowGraphBuilder()
-        graph = builder.build_graph(X, y, method="knn", k=5, metric="cosine")
+        graphs = builder.build_windowed_dataset(
+            X,
+            y,
+            window_size=self.window_size,
+            method="knn",
+            bidirectional=True,
+            k=5,
+        )
+
+        if len(graphs) == 0:
+            raise ValueError("No graphs were created from the input data.")
 
         # Save statistics
         self.statistics = {
-            "num_nodes": graph.x.shape[0],
-            "num_edges": graph.edge_index.shape[1],
-            "num_features": graph.x.shape[1],
-            "num_classes": len(np.unique(y)),
-            "class_distribution": dict(
-                zip(*np.unique(y, return_counts=True))
-            ),
+            "num_graphs": len(graphs),
+            "total_nodes": sum(graph.x.shape[0] for graph in graphs),
+            "total_edges": sum(graph.edge_index.shape[1] for graph in graphs),
+            "num_features": graphs[0].x.shape[1],
+            "class_distribution": self._calculate_class_distribution(graphs),
         }
 
         logger.info(f"Dataset statistics: {self.statistics}")
@@ -139,8 +192,9 @@ class NetworkFlowDataset(InMemoryDataset):
         Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
 
         data_path = os.path.join(self.processed_dir, self.processed_file_names[0])
-        torch.save(graph, data_path)
-        logger.info(f"Saved processed graph to {data_path}")
+        data, slices = self.collate(graphs)
+        torch.save((data, slices), data_path)
+        logger.info(f"Saved processed graphs to {data_path}")
 
         # Save statistics
         stats_path = os.path.join(
@@ -151,11 +205,15 @@ class NetworkFlowDataset(InMemoryDataset):
         logger.info(f"Saved statistics to {stats_path}")
 
         # Store in memory
-        self.data_list = [graph]
+        self.data = data
+        self.slices = slices
+        self.data_list = graphs
 
     def len(self) -> int:
         """Return the length of the dataset."""
-        return len(self.data_list)
+        if self.data_list:
+            return len(self.data_list)
+        return super().len()
 
     def get(self, idx: int) -> Data:
         """Get a single sample from the dataset.
@@ -166,9 +224,49 @@ class NetworkFlowDataset(InMemoryDataset):
         Returns:
             PyG Data object.
         """
-        if idx >= len(self.data_list):
-            raise IndexError(f"Index {idx} out of range")
-        return self.data_list[idx]
+        if self.data_list:
+            if idx >= len(self.data_list):
+                raise IndexError(f"Index {idx} out of range")
+            return self.data_list[idx]
+        return super().get(idx)
+
+    def _calculate_class_distribution(self, graphs: List[Data]) -> dict:
+        """Calculate class distribution across multiple graphs."""
+        counts = {}
+        for graph in graphs:
+            labels = graph.y.numpy() if isinstance(graph.y, torch.Tensor) else np.array(graph.y)
+            unique, freq = np.unique(labels, return_counts=True)
+            for label, count in zip(unique, freq):
+                counts[int(label)] = counts.get(int(label), 0) + int(count)
+        return counts
+
+    def _remove_processed_files(self) -> None:
+        """Remove split-specific processed files to force rebuild."""
+        Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
+        for filename in self.processed_file_names:
+            path = os.path.join(self.processed_dir, filename)
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"Removed processed file: {path}")
+        if self.split == "train":
+            preprocessor_path = os.path.join(self.processed_dir, self.PREPROCESSOR_STATE_FILE)
+            if os.path.exists(preprocessor_path):
+                os.remove(preprocessor_path)
+                logger.info(f"Removed train preprocessor state: {preprocessor_path}")
+
+    def _load_processed_graphs(self) -> None:
+        """Load processed graphs into memory from existing processed files."""
+        data_path = os.path.join(self.processed_dir, f"data_{self.split}.pt")
+        if os.path.exists(data_path):
+            data, slices = torch.load(data_path)
+            self.data = data
+            self.slices = slices
+            self.load_statistics()
+            num_graphs = super().len()
+            self.data_list = [InMemoryDataset.get(self, i) for i in range(num_graphs)]
+            logger.info(
+                f"Loaded {len(self.data_list)} processed graph(s) for split={self.split}"
+            )
 
     def load_statistics(self) -> dict:
         """Load dataset statistics.
@@ -177,7 +275,7 @@ class NetworkFlowDataset(InMemoryDataset):
             Dictionary of statistics.
         """
         stats_path = os.path.join(
-            self.processed_dir, self.processed_file_names[1]
+            self.processed_dir, f"statistics_{self.split}.pkl"
         )
         if os.path.exists(stats_path):
             with open(stats_path, "rb") as f:
@@ -192,6 +290,7 @@ class NetworkFlowDataset(InMemoryDataset):
         split: str = "train",
         root: str = "data/graphs",
         rebuild: bool = False,
+        window_size: int = 1000,
     ) -> "NetworkFlowDataset":
         """Create a network flow dataset.
 
@@ -218,6 +317,7 @@ class NetworkFlowDataset(InMemoryDataset):
             name=name,
             split=split,
             rebuild=rebuild,
+            window_size=window_size,
         )
 
         # Load statistics
@@ -231,6 +331,7 @@ def load_split_datasets(
     name: str = "nsl-kdd",
     root: str = "data/graphs",
     rebuild: bool = False,
+    window_size: int = 1000,
 ) -> Tuple[NetworkFlowDataset, NetworkFlowDataset]:
     """Load both train and test datasets.
 
@@ -245,10 +346,18 @@ def load_split_datasets(
     logger.info(f"Loading train and test datasets for {name}...")
 
     train_dataset = NetworkFlowDataset.create_dataset(
-        name=name, split="train", root=root, rebuild=rebuild
+        name=name,
+        split="train",
+        root=root,
+        rebuild=rebuild,
+        window_size=window_size,
     )
     test_dataset = NetworkFlowDataset.create_dataset(
-        name=name, split="test", root=root, rebuild=rebuild
+        name=name,
+        split="test",
+        root=root,
+        rebuild=rebuild,
+        window_size=window_size,
     )
 
     logger.info(

@@ -5,11 +5,13 @@ Tests cover: download, preprocessing, graph construction, and dataset management
 """
 
 import unittest
+from unittest.mock import patch
 import tempfile
 import shutil
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import pickle
 import logging
 
 # Add src to path for imports
@@ -447,21 +449,47 @@ class TestNetworkFlowDataset(unittest.TestCase):
 
         return str(filepath)
 
+    def _write_raw_split(self, split: str, n_samples: int = 100) -> str:
+        """Write synthetic raw KDD data for a given split."""
+        raw_dir = Path(self.temp_dir) / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        filename = "KDDTrain+.txt" if split == "train" else "KDDTest+.txt"
+
+        data = []
+        protocols = ["tcp", "udp", "icmp"]
+        services = ["http", "ftp", "ssh", "domain"]
+        flags = ["SF", "S0", "S1"]
+        labels = ["normal", "dos"]
+
+        for i in range(n_samples):
+            row = [
+                str(i),
+                protocols[i % len(protocols)],
+                services[i % len(services)],
+                flags[i % len(flags)],
+            ] + [str(i * 0.1) for _ in range(37)]
+            row.append(labels[i % len(labels)])
+            data.append(",".join(row))
+
+        filepath = raw_dir / filename
+        with open(filepath, "w") as f:
+            f.write("\n".join(data))
+
+        return str(filepath)
+
     def test_dataset_creation(self):
         """Test dataset creation."""
         # Note: This test creates dataset but doesn't actually download
-        # since we're using a mock. In practice, real data would be downloaded.
-        try:
-            dataset = NetworkFlowDataset.create_dataset(
-                name="nsl-kdd",
-                split="train",
-                root=self.temp_dir
-            )
-            self.assertIsInstance(dataset, NetworkFlowDataset)
-        except Exception as e:
-            # Expected to fail without real data, but test structure is correct
-            logger.info(f"Dataset creation attempted (expected failure): {e}")
-
+        # since we're using local raw files.
+        self._write_raw_split("train", 40)
+        dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+        )
+        self.assertIsInstance(dataset, NetworkFlowDataset)
+        self.assertGreater(len(dataset), 0)
         logger.info("✓ Dataset creation test passed")
 
     def test_split_validation(self):
@@ -472,6 +500,189 @@ class TestNetworkFlowDataset(unittest.TestCase):
                 root=self.temp_dir
             )
         logger.info("✓ Split validation test passed")
+
+    def test_train_split_fits_preprocessor(self):
+        """Test that train split fits the preprocessor state."""
+        self._write_raw_split("train", 40)
+        dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        # Check preprocessor state file exists
+        preprocessor_path = Path(self.temp_dir) / "processed" / NetworkFlowDataset.PREPROCESSOR_STATE_FILE
+        self.assertTrue(preprocessor_path.exists())
+
+        # Load and verify contents
+        with open(preprocessor_path, "rb") as f:
+            state = pickle.load(f)
+
+        self.assertIn("scaler", state)
+        self.assertIn("label_encoders", state)
+        self.assertIn("feature_names", state)
+        self.assertIsNotNone(state["scaler"])
+        # Ensure label encoders for categorical cols exist
+        for col in NSLKDDPreprocessor.CATEGORICAL_COLUMNS:
+            self.assertIn(col, state["label_encoders"]) 
+        # Feature names should be 41 features
+        self.assertEqual(len(state["feature_names"]), 41)
+
+        # Check processed files exist
+        data_path = Path(self.temp_dir) / "processed" / f"data_train.pt"
+        stats_path = Path(self.temp_dir) / "processed" / f"statistics_train.pkl"
+        self.assertTrue(data_path.exists())
+        self.assertTrue(stats_path.exists())
+        self.assertEqual(len(dataset), 2)
+        logger.info("✓ Train split fit behavior test passed")
+
+    def test_test_split_uses_existing_preprocessor(self):
+        """Test that test split loads existing preprocessor and uses fit=False."""
+        self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
+
+        # Build train dataset first
+        NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+        # Record preprocessor state bytes before
+        preprocessor_path = Path(self.temp_dir) / "processed" / NetworkFlowDataset.PREPROCESSOR_STATE_FILE
+        self.assertTrue(preprocessor_path.exists())
+        before_bytes = preprocessor_path.read_bytes()
+
+        # Create test dataset
+        dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="test",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        # Check test processed files
+        data_path = Path(self.temp_dir) / "processed" / f"data_test.pt"
+        stats_path = Path(self.temp_dir) / "processed" / f"statistics_test.pkl"
+        self.assertTrue(data_path.exists())
+        self.assertTrue(stats_path.exists())
+
+        # Ensure preprocessor state still exists and was not overwritten
+        self.assertTrue(preprocessor_path.exists())
+        after_bytes = preprocessor_path.read_bytes()
+        self.assertEqual(before_bytes, after_bytes)
+
+        # Basic dataset length check
+        self.assertEqual(len(dataset), 2)
+        logger.info("✓ Test split fit=False behavior test passed")
+
+    def test_test_split_fails_without_train_preprocessor_state(self):
+        """Test that test split creation fails if train preprocessor state is missing."""
+        self._write_raw_split("test", 40)
+
+        with self.assertRaises(FileNotFoundError) as context:
+            NetworkFlowDataset.create_dataset(
+                name="nsl-kdd",
+                split="test",
+                root=self.temp_dir,
+                rebuild=True,
+                window_size=20,
+            )
+
+        self.assertIn("Process the train split first", str(context.exception))
+        logger.info("✓ Test split missing preprocessor state failure test passed")
+
+    def test_test_rebuild_preserves_train_preprocessor_state(self):
+        """Test that rebuild=True for test does not delete train preprocessor state."""
+        self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
+
+        NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        preprocessor_path = Path(self.temp_dir) / "processed" / NetworkFlowDataset.PREPROCESSOR_STATE_FILE
+        self.assertTrue(preprocessor_path.exists())
+
+        NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="test",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        self.assertTrue(preprocessor_path.exists())
+        logger.info("✓ Test split rebuild preserves train preprocessor state test passed")
+
+    def test_processed_cache_loads_without_reprocessing(self):
+        """Test that processed data is loaded from cache when rebuild=False."""
+        self._write_raw_split("train", 40)
+        NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        with patch.object(NetworkFlowDataset, "process", autospec=True, wraps=NetworkFlowDataset.process) as mock_process:
+            dataset = NetworkFlowDataset.create_dataset(
+                name="nsl-kdd",
+                split="train",
+                root=self.temp_dir,
+                rebuild=False,
+                window_size=20,
+            )
+
+        self.assertFalse(mock_process.called)
+        self.assertEqual(len(dataset), 2)
+        logger.info("✓ Cached dataset load test passed")
+
+    def test_rebuild_forces_reprocessing(self):
+        """Test that rebuild=True forces dataset reprocessing."""
+        self._write_raw_split("train", 40)
+        NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        with patch.object(NetworkFlowDataset, "process", autospec=True, wraps=NetworkFlowDataset.process) as mock_process:
+            NetworkFlowDataset.create_dataset(
+                name="nsl-kdd",
+                split="train",
+                root=self.temp_dir,
+                rebuild=True,
+                window_size=20,
+            )
+
+        self.assertTrue(mock_process.called)
+        logger.info("✓ Rebuild forces reprocessing test passed")
+
+    def test_dataset_length_matches_window_count(self):
+        """Test that dataset length equals the number of graph windows."""
+        self._write_raw_split("train", 45)
+        dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=20,
+        )
+
+        self.assertEqual(len(dataset), 3)
+        logger.info("✓ Dataset length window count test passed")
 
 
 class TestIntegration(unittest.TestCase):
