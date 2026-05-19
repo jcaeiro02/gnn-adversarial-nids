@@ -1,1 +1,9 @@
-# Placeholder for base_config.yaml
+train:
+  seed: 42
+  device: auto
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0005
+  patience: 15
+  batch_size: 1
+  window_size: 1000
