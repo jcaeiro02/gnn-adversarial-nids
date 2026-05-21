@@ -1,3 +1,4 @@
+import importlib.util
 import shutil
 import sys
 import tempfile
@@ -56,6 +57,13 @@ class TestTrainingPipeline(unittest.TestCase):
             batch_size=1,
         )
 
+        spec = importlib.util.spec_from_file_location(
+            "baseline_training",
+            Path(__file__).parent.parent / "experiments" / "01_baseline_training.py",
+        )
+        self.baseline_training = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.baseline_training)
+
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -100,6 +108,52 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertIsNotNone(fit_result["best_checkpoint"])
         self.assertTrue(Path(fit_result["best_checkpoint"]).exists())
         self.assertGreaterEqual(fit_result["best_f1"], 0.0)
+
+    def test_output_functions_create_run_artifacts(self):
+        temp_run_dir = Path(self.temp_dir) / "results" / "runs" / "test_dataset_gcn"
+        self.baseline_training.save_config_yaml({"foo": "bar"}, temp_run_dir, filename="config.yaml")
+        self.assertTrue((temp_run_dir / "config.yaml").exists())
+
+        metrics = {"train": {"accuracy": 1.0}, "validation": {"accuracy": 1.0}, "test": {"accuracy": 1.0}}
+        metrics_path = self.baseline_training.save_metrics_json(metrics, temp_run_dir, filename="metrics.json")
+        self.assertTrue(metrics_path.exists())
+
+        summary = {
+            "run_id": "test_run",
+            "timestamp": "20250101_000000",
+            "dataset": "nsl-kdd",
+            "model": "gcn",
+            "epochs": 1,
+            "window_size": 100,
+            "hidden_dim": 16,
+            "dropout": 0.5,
+            "learning_rate": 0.01,
+            "weight_decay": 0.0,
+            "patience": 1,
+            "batch_size": 1,
+            "train_accuracy": 1.0,
+            "train_f1": 1.0,
+            "validation_accuracy": 1.0,
+            "validation_f1": 1.0,
+            "test_accuracy": 1.0,
+            "test_f1": 1.0,
+            "test_roc_auc": 1.0,
+            "best_checkpoint": "checkpoint.pt",
+        }
+        summary_csv = temp_run_dir / "summary.csv"
+        self.baseline_training.append_csv_summary(summary, summary_csv)
+        self.assertTrue(summary_csv.exists())
+
+        global_summary_csv = Path(self.temp_dir) / "results" / "experiments_summary.csv"
+        self.baseline_training.append_csv_summary(summary, global_summary_csv)
+        self.assertTrue(global_summary_csv.exists())
+
+    def test_create_run_directory_uniqueness(self):
+        run_dir_1 = self.baseline_training.create_run_directory("nsl-kdd", "gcn", base_dir=Path(self.temp_dir) / "results" / "runs")
+        run_dir_2 = self.baseline_training.create_run_directory("nsl-kdd", "gcn", base_dir=Path(self.temp_dir) / "results" / "runs")
+        self.assertNotEqual(run_dir_1, run_dir_2)
+        self.assertTrue(run_dir_1.exists())
+        self.assertTrue(run_dir_2.exists())
 
     def test_binary_classification_metrics(self):
         y_true = [0, 1, 1, 0, 1]

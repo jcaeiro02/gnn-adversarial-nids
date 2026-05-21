@@ -7,8 +7,9 @@ import json
 import logging
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -94,6 +95,14 @@ def save_metrics_json(metrics: dict, output_dir: Path, filename: str = "metrics.
     return metrics_path
 
 
+def save_config_yaml(config: dict, output_dir: Path, filename: str = "config.yaml") -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = output_dir / filename
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle)
+    return config_path
+
+
 def append_csv_summary(summary: dict, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not output_path.exists()
@@ -103,6 +112,29 @@ def append_csv_summary(summary: dict, output_path: Path) -> Path:
             writer.writeheader()
         writer.writerow(summary)
     return output_path
+
+
+def create_run_directory(dataset: str, model: str, base_dir: Path = Path("results") / "runs") -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{timestamp}_{dataset}_{model}"
+    run_dir = base_dir / run_name
+    suffix = 0
+    while run_dir.exists():
+        suffix += 1
+        run_dir = base_dir / f"{run_name}_{suffix}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
+
+
+def setup_training_log(run_dir: Path) -> logging.Handler:
+    log_path = run_dir / "training_log.txt"
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    return handler
 
 
 def run_training(args: argparse.Namespace) -> dict:
@@ -122,93 +154,129 @@ def run_training(args: argparse.Namespace) -> dict:
 
     window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
 
-    if args.dry_run:
-        train_dataset = build_synthetic_graphs(num_graphs=2, num_nodes=16, num_node_features=12)
-        test_dataset = build_synthetic_graphs(num_graphs=1, num_nodes=16, num_node_features=12)
-        logger.info("Dry-run mode: using synthetic datasets for a minimal execution path.")
-    else:
-        train_dataset, test_dataset = load_split_datasets(
-            name=args.dataset,
-            root="data/graphs",
-            rebuild=args.rebuild_data,
-            window_size=window_size,
+    run_dir = create_run_directory(args.dataset, args.model)
+    run_id = run_dir.name
+    timestamp = run_dir.name.split("_")[0]
+
+    log_handler = setup_training_log(run_dir)
+    try:
+        if args.dry_run:
+            train_dataset = build_synthetic_graphs(num_graphs=2, num_nodes=16, num_node_features=12)
+            test_dataset = build_synthetic_graphs(num_graphs=1, num_nodes=16, num_node_features=12)
+            logger.info("Dry-run mode: using synthetic datasets for a minimal execution path.")
+        else:
+            train_dataset, test_dataset = load_split_datasets(
+                name=args.dataset,
+                root="data/graphs",
+                rebuild=args.rebuild_data,
+                window_size=window_size,
+            )
+
+        train_dataset_split, val_dataset = build_dataset_splits(train_dataset, seed=seed)
+        num_node_features = (
+            train_dataset[0].x.shape[1]
+            if not args.dry_run
+            else 12
+        )
+        model = build_model(
+            args.model,
+            num_node_features=num_node_features,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
         )
 
-    train_dataset_split, val_dataset = build_dataset_splits(train_dataset, seed=seed)
-    num_node_features = (
-        train_dataset[0].x.shape[1]
-        if not args.dry_run
-        else 12
-    )
-    model = build_model(
-        args.model,
-        num_node_features=num_node_features,
-        hidden_dim=args.hidden_dim,
-        dropout=args.dropout,
-    )
+        trainer = Trainer(
+            model=model,
+            device=training_config["device"],
+            learning_rate=training_config["learning_rate"],
+            weight_decay=training_config["weight_decay"],
+            epochs=training_config["epochs"],
+            patience=training_config["patience"],
+            output_dir=str(run_dir),
+            batch_size=training_config["batch_size"],
+        )
 
-    trainer = Trainer(
-        model=model,
-        device=training_config["device"],
-        learning_rate=training_config["learning_rate"],
-        weight_decay=training_config["weight_decay"],
-        epochs=training_config["epochs"],
-        patience=training_config["patience"],
-        output_dir="results/models",
-        batch_size=training_config["batch_size"],
-    )
+        fit_result = trainer.fit(train_dataset_split, val_dataset=val_dataset, dry_run=args.dry_run)
 
-    fit_result = trainer.fit(train_dataset_split, val_dataset=val_dataset, dry_run=args.dry_run)
+        train_metrics = trainer.evaluate(train_dataset)
+        test_metrics = trainer.evaluate(test_dataset)
+        val_metrics = trainer.evaluate(val_dataset)
 
-    train_metrics = trainer.evaluate(train_dataset)
-    test_metrics = trainer.evaluate(test_dataset)
-    val_metrics = trainer.evaluate(val_dataset)
-
-    results = {
-        "config": {
-            "model": args.model,
+        full_config = {
+            "run_id": run_id,
+            "timestamp": timestamp,
             "dataset": args.dataset,
+            "model": args.model,
+            "dry_run": args.dry_run,
+            "config_file": str(DEFAULT_CONFIG_PATH),
+            "loaded_config": config,
+            "runtime_config": {
+                "epochs": training_config["epochs"],
+                "learning_rate": training_config["learning_rate"],
+                "weight_decay": training_config["weight_decay"],
+                "patience": training_config["patience"],
+                "batch_size": training_config["batch_size"],
+                "device": training_config["device"],
+                "window_size": window_size,
+                "hidden_dim": args.hidden_dim,
+                "dropout": args.dropout,
+            },
+        }
+
+        results = {
+            "run_id": run_id,
+            "timestamp": timestamp,
+            "config": full_config,
+            "fit": fit_result,
+            "metrics": {
+                "train": train_metrics,
+                "validation": val_metrics,
+                "test": test_metrics,
+            },
+        }
+
+        save_config_yaml(full_config, run_dir, filename="config.yaml")
+        metrics_file = save_metrics_json(results, run_dir, filename="metrics.json")
+
+        summary = {
+            "run_id": run_id,
+            "timestamp": timestamp,
+            "dataset": args.dataset,
+            "model": args.model,
             "epochs": training_config["epochs"],
+            "window_size": window_size,
+            "hidden_dim": args.hidden_dim,
+            "dropout": args.dropout,
             "learning_rate": training_config["learning_rate"],
             "weight_decay": training_config["weight_decay"],
             "patience": training_config["patience"],
             "batch_size": training_config["batch_size"],
-            "window_size": window_size,
-            "hidden_dim": args.hidden_dim,
-            "dropout": args.dropout,
-            "dry_run": args.dry_run,
-        },
-        "fit": fit_result,
-        "metrics": {
-            "train": train_metrics,
-            "validation": val_metrics,
-            "test": test_metrics,
-        },
-    }
+            "train_accuracy": train_metrics["accuracy"],
+            "train_f1": train_metrics["f1"],
+            "validation_accuracy": val_metrics["accuracy"],
+            "validation_f1": val_metrics["f1"],
+            "test_accuracy": test_metrics["accuracy"],
+            "test_f1": test_metrics["f1"],
+            "test_roc_auc": test_metrics.get("roc_auc"),
+            "best_checkpoint": fit_result["best_checkpoint"],
+        }
 
-    metrics_output_dir = Path("results/metrics")
-    metrics_file = save_metrics_json(results, metrics_output_dir, filename="baseline_metrics.json")
-    summary = {
-        "model": args.model,
-        "dataset": args.dataset,
-        "epochs": training_config["epochs"],
-        "window_size": window_size,
-        "hidden_dim": args.hidden_dim,
-        "dropout": args.dropout,
-        "train_accuracy": train_metrics["accuracy"],
-        "train_f1": train_metrics["f1"],
-        "validation_accuracy": val_metrics["accuracy"],
-        "validation_f1": val_metrics["f1"],
-        "test_accuracy": test_metrics["accuracy"],
-        "test_f1": test_metrics["f1"],
-        "best_checkpoint": fit_result["best_checkpoint"],
-    }
-    summary_path = append_csv_summary(summary, metrics_output_dir / "baseline_summary.csv")
+        summary_csv_path = run_dir / "summary.csv"
+        append_csv_summary(summary, summary_csv_path)
 
-    logger.info("Baseline training complete.")
-    logger.info("Saved metrics: %s", metrics_file)
-    logger.info("Saved summary: %s", summary_path)
-    return results
+        global_summary_path = Path("results") / "experiments_summary.csv"
+        append_csv_summary(summary, global_summary_path)
+
+        logger.info("Baseline training complete.")
+        logger.info("Saved config: %s", run_dir / "config.yaml")
+        logger.info("Saved metrics: %s", metrics_file)
+        logger.info("Saved summary: %s", summary_csv_path)
+        logger.info("Saved checkpoint: %s", fit_result["best_checkpoint"])
+
+        return results
+    finally:
+        logging.getLogger().removeHandler(log_handler)
+        log_handler.close()
 
 
 def parse_args() -> argparse.Namespace:
