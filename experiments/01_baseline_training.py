@@ -214,7 +214,7 @@ def run_training(args: argparse.Namespace) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and evaluate a flow-centric GNN baseline.")
     parser.add_argument("--model", choices=["gcn", "gat"], default="gcn")
-    parser.add_argument("--dataset", choices=["nsl-kdd"], default="nsl-kdd")
+    parser.add_argument("--dataset", choices=["nsl-kdd", "cicids2017"], default="nsl-kdd")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--window-size", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=64)

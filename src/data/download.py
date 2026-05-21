@@ -110,6 +110,45 @@ class DatasetDownloader:
 
         return success
 
+    def download_cicids2017(self, base_dir: Optional[str] = None) -> bool:
+        """Validate manual placement of CICIDS2017 CSV files.
+
+        CICIDS2017 is not automatically downloaded from Kaggle. Users must place
+        one or more CSV files under the target directory before processing.
+
+        Args:
+            base_dir: Optional directory where CSV files are located.
+                If not provided, uses self.base_dir.
+
+        Returns:
+            True if at least one CSV file exists, False otherwise.
+        """
+        target_dir = Path(base_dir) if base_dir else self.base_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        csv_files = list(target_dir.glob("*.csv"))
+        if len(csv_files) == 0:
+            logger.warning(
+                "No CICIDS2017 CSV files found in %s. "
+                "Please download the CICIDS2017 CSV files manually and place them in this directory: %s",
+                target_dir,
+            )
+            logger.info(
+                "Expected path pattern: data/raw/cicids2017/*.csv"
+            )
+            logger.info(
+                "Example: download CICIDS2017 from Kaggle, extract CSV files, "
+                "and copy them into the target directory."
+            )
+            return False
+
+        logger.info(
+            "Found %d CICIDS2017 CSV file(s) in %s",
+            len(csv_files),
+            target_dir,
+        )
+        return True
+
     def download_all(self, force: bool = False) -> bool:
         """Download all available datasets.
 
@@ -120,8 +159,9 @@ class DatasetDownloader:
             True if all downloads successful, False otherwise.
         """
         logger.info("Starting download of all datasets...")
-        # Currently only NSL-KDD available
-        return self.download_nsl_kdd(force=force)
+        success = self.download_nsl_kdd(force=force)
+        cicids_success = DatasetDownloader(base_dir=Path(self.base_dir).parent / "cicids2017").download_cicids2017()
+        return success and cicids_success
 
     def get_dataset_path(self, dataset_name: str) -> Optional[Path]:
         """Get path to a downloaded dataset.
@@ -144,7 +184,7 @@ class DatasetDownloader:
         Returns:
             List of dataset filenames.
         """
-        datasets = [f.name for f in self.base_dir.glob("*.txt")]
+        datasets = [f.name for f in self.base_dir.glob("*.txt")] + [f.name for f in self.base_dir.glob("*.csv")]
         logger.info(f"Found {len(datasets)} datasets")
         return datasets
 

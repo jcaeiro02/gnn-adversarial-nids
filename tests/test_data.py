@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from data.download import DatasetDownloader
-from data.preprocess import NSLKDDPreprocessor
+from data.preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from data.graph_builder import FlowGraphBuilder
 from data.dataset import NetworkFlowDataset, load_split_datasets
 import torch
@@ -213,6 +213,80 @@ class TestNSLKDDPreprocessor(unittest.TestCase):
         np.testing.assert_array_almost_equal(X, X_loaded)
         np.testing.assert_array_equal(y, y_loaded)
         logger.info("✓ Save and load preprocessed test passed")
+
+
+class TestCICIDS2017Preprocessor(unittest.TestCase):
+    """Tests for CICIDS2017 data preprocessing."""
+
+    def setUp(self):
+        self.preprocessor = CICIDS2017Preprocessor()
+        self.temp_dir = tempfile.mkdtemp()
+        self.raw_dir = Path(self.temp_dir).parent / "raw" / "cicids2017"
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+        if self.raw_dir.exists():
+            shutil.rmtree(self.raw_dir.parent)
+
+    def _write_cicids_csv(self, num_files: int = 2, rows_per_file: int = 5, include_bad_values: bool = False):
+        for file_idx in range(num_files):
+            rows = []
+            for i in range(rows_per_file):
+                row = {
+                    "Flow ID": f"flow-{file_idx}-{i}",
+                    "Source IP": "192.168.0.1",
+                    "Destination IP": "10.0.0.1",
+                    "Timestamp": "2023-01-01 00:00:00",
+                    "SimillarHTTP": "None",
+                    "Fwd Packet Length Mean": float(i) * 1.5,
+                    "Bwd Packet Length Mean": float(i) * 2.5,
+                    "Tot Fwd Packets": float(i + 1),
+                    "Label": "BENIGN" if i % 2 == 0 else "FTP-Patator",
+                }
+                if include_bad_values and i == 0:
+                    row["Fwd Packet Length Mean"] = np.nan
+                    row["Bwd Packet Length Mean"] = np.inf
+                rows.append(row)
+
+            pd.DataFrame(rows).to_csv(
+                self.raw_dir / f"cicids_part_{file_idx}.csv",
+                index=False,
+            )
+
+    def test_loads_multiple_csv_files(self):
+        self._write_cicids_csv(num_files=2, rows_per_file=4)
+        df = self.preprocessor.load_data(str(self.raw_dir))
+
+        self.assertEqual(df.shape[0], 8)
+        self.assertIn("Flow ID", df.columns)
+        self.assertIn("Label", df.columns)
+        logger.info("✓ CICIDS2017 multiple CSV load test passed")
+
+    def test_drops_identifier_columns_and_encodes_labels(self):
+        self._write_cicids_csv(num_files=1, rows_per_file=6)
+        df = self.preprocessor.load_data(str(self.raw_dir))
+        X, y = self.preprocessor.preprocess(df, fit=True)
+
+        self.assertEqual(X.dtype, np.float32)
+        self.assertEqual(y.dtype, np.int64)
+        self.assertNotIn("Flow ID", self.preprocessor.feature_names)
+        self.assertNotIn("Source IP", self.preprocessor.feature_names)
+        self.assertNotIn("Destination IP", self.preprocessor.feature_names)
+        self.assertNotIn("Timestamp", self.preprocessor.feature_names)
+        self.assertNotIn("SimillarHTTP", self.preprocessor.feature_names)
+        self.assertTrue(set(np.unique(y)).issubset({0, 1}))
+        self.assertGreater(len(self.preprocessor.feature_names), 0)
+        logger.info("✓ CICIDS2017 label conversion and identifier drop test passed")
+
+    def test_handles_nan_and_inf_values(self):
+        self._write_cicids_csv(num_files=1, rows_per_file=5, include_bad_values=True)
+        df = self.preprocessor.load_data(str(self.raw_dir))
+        X, y = self.preprocessor.preprocess(df, fit=True)
+
+        self.assertFalse(np.any(np.isnan(X)))
+        self.assertFalse(np.any(np.isinf(X)))
+        logger.info("✓ CICIDS2017 missing values handling test passed")
 
 
 class TestFlowGraphBuilder(unittest.TestCase):
@@ -491,6 +565,75 @@ class TestNetworkFlowDataset(unittest.TestCase):
         self.assertIsInstance(dataset, NetworkFlowDataset)
         self.assertGreater(len(dataset), 0)
         logger.info("✓ Dataset creation test passed")
+
+    def _write_cicids2017_csv_files(self, num_files: int = 2, rows_per_file: int = 8):
+        raw_dir = Path(self.temp_dir).parent / "raw" / "cicids2017"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        for file_idx in range(num_files):
+            rows = []
+            for i in range(rows_per_file):
+                rows.append({
+                    "Flow ID": f"flow-{file_idx}-{i}",
+                    "Source IP": "192.168.0.1",
+                    "Destination IP": "10.0.0.1",
+                    "Timestamp": "2023-01-01 00:00:00",
+                    "SimillarHTTP": "None",
+                    "Fwd Packet Length Mean": float(i) * 1.1,
+                    "Bwd Packet Length Mean": float(i) * 2.2,
+                    "Tot Fwd Packets": float(i + 1),
+                    "Label": "BENIGN" if i % 2 == 0 else "FTP-Patator",
+                })
+
+            pd.DataFrame(rows).to_csv(raw_dir / f"cicids_part_{file_idx}.csv", index=False)
+
+        return raw_dir
+
+    def test_cicids2017_split_indices_are_deterministic(self):
+        raw_dir = self._write_cicids2017_csv_files(num_files=2, rows_per_file=8)
+        train_dataset = NetworkFlowDataset.create_dataset(
+            name="cicids2017",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=16,
+        )
+
+        split_file = raw_dir / NetworkFlowDataset.CICIDS2017_SPLIT_STATE_FILE
+        self.assertTrue(split_file.exists())
+
+        with open(split_file, "rb") as f:
+            split_indices = pickle.load(f)
+
+        self.assertEqual(len(split_indices["train"]) + len(split_indices["test"]), 16)
+        self.assertGreater(len(split_indices["train"]), 0)
+        self.assertGreater(len(split_indices["test"]), 0)
+        self.assertEqual(len(train_dataset), 1)
+        logger.info("✓ CICIDS2017 deterministic split index test passed")
+
+    def test_cicids2017_dataset_creation_and_graph_building(self):
+        raw_dir = self._write_cicids2017_csv_files(num_files=2, rows_per_file=8)
+        train_dataset = NetworkFlowDataset.create_dataset(
+            name="cicids2017",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=10,
+        )
+
+        test_dataset = NetworkFlowDataset.create_dataset(
+            name="cicids2017",
+            split="test",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=10,
+        )
+
+        self.assertGreater(len(train_dataset), 0)
+        self.assertGreater(len(test_dataset), 0)
+        self.assertTrue(all(hasattr(graph, "x") for graph in train_dataset.data_list))
+        self.assertTrue(all(hasattr(graph, "y") for graph in test_dataset.data_list))
+        logger.info("✓ CICIDS2017 dataset creation and graph building test passed")
 
     def test_split_validation(self):
         """Test that invalid splits raise errors."""

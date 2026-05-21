@@ -14,7 +14,7 @@ import torch
 from torch_geometric.data import InMemoryDataset, Data
 
 from .download import DatasetDownloader
-from .preprocess import NSLKDDPreprocessor
+from .preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from .graph_builder import FlowGraphBuilder
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class NetworkFlowDataset(InMemoryDataset):
     """
 
     PREPROCESSOR_STATE_FILE = "preprocessor_state.pkl"
+    CICIDS2017_SPLIT_STATE_FILE = "cicids2017_split_indices.pkl"
 
     def __init__(
         self,
@@ -74,6 +75,10 @@ class NetworkFlowDataset(InMemoryDataset):
     @property
     def raw_dir(self) -> str:
         """Return raw data directory path."""
+        if self.name == "cicids2017":
+            root_path = Path(self._root_path)
+            parent_dir = root_path.parent
+            return os.path.join(parent_dir, "raw", "cicids2017")
         return os.path.join(self._root_path, "raw")
 
     @property
@@ -85,11 +90,12 @@ class NetworkFlowDataset(InMemoryDataset):
     def raw_file_names(self) -> List[str]:
         """Return list of raw file names."""
         if self.name == "nsl-kdd":
-            if self.split == "train":
-                return ["KDDTrain+.txt"]
-            else:
-                return ["KDDTest+.txt"]
-        return []
+            return ["KDDTrain+.txt"] if self.split == "train" else ["KDDTest+.txt"]
+
+        raw_dir = Path(self.raw_dir)
+        if not raw_dir.exists():
+            return []
+        return [f.name for f in sorted(raw_dir.glob("*.csv"))]
 
     @property
     def processed_file_names(self) -> List[str]:
@@ -106,7 +112,7 @@ class NetworkFlowDataset(InMemoryDataset):
         # Create raw directory
         Path(self.raw_dir).mkdir(parents=True, exist_ok=True)
 
-        # Download dataset
+        # Download dataset or validate manual placement
         downloader = DatasetDownloader(base_dir=self.raw_dir)
 
         if self.name == "nsl-kdd":
@@ -114,37 +120,88 @@ class NetworkFlowDataset(InMemoryDataset):
             if not success:
                 raise RuntimeError(f"Failed to download {self.name} dataset")
             logger.info(f"Successfully downloaded {self.name} dataset")
+        elif self.name == "cicids2017":
+            success = downloader.download_cicids2017(base_dir=self.raw_dir)
+            if not success:
+                raise RuntimeError(
+                    f"CICIDS2017 dataset not found in {self.raw_dir}. "
+                    "Place CSV files manually under this directory."
+                )
+            logger.info(f"CICIDS2017 raw files verified at {self.raw_dir}")
         else:
             raise ValueError(f"Unknown dataset: {self.name}")
+
+    def _load_or_create_cicids2017_split_indices(self, n_samples: int) -> dict:
+        split_path = os.path.join(self.raw_dir, self.CICIDS2017_SPLIT_STATE_FILE)
+        if os.path.exists(split_path):
+            with open(split_path, "rb") as f:
+                logger.info(f"Loaded existing CICIDS2017 split indices from {split_path}")
+                return pickle.load(f)
+
+        indices = np.arange(n_samples)
+        rng = np.random.default_rng(42)
+        rng.shuffle(indices)
+        train_size = int(np.ceil(n_samples * 0.8))
+        split_indices = {
+            "train": indices[:train_size],
+            "test": indices[train_size:],
+        }
+
+        Path(self.raw_dir).mkdir(parents=True, exist_ok=True)
+        with open(split_path, "wb") as f:
+            pickle.dump(split_indices, f)
+        logger.info(f"Saved deterministic CICIDS2017 split indices to {split_path}")
+        return split_indices
 
     def process(self) -> None:
         """Process raw data into PyG graph format."""
         logger.info(f"Processing {self.name} dataset ({self.split} split)...")
 
-        # Get raw data path
-        raw_file = os.path.join(self.raw_dir, self.raw_file_names[0])
-
-        if not os.path.exists(raw_file):
-            raise FileNotFoundError(f"Raw data file not found: {raw_file}")
-
         # Load and preprocess data
         logger.info("Loading and preprocessing raw data...")
-        preprocessor = NSLKDDPreprocessor()
-        if self.split == "train":
-            df = preprocessor.load_data(raw_file)
-            X, y = preprocessor.preprocess(df, fit=True)
-        else:
-            preprocessor_state_path = os.path.join(
-                self.processed_dir, self.PREPROCESSOR_STATE_FILE
-            )
-            if not os.path.exists(preprocessor_state_path):
-                raise FileNotFoundError(
-                    f"Preprocessor state not found: {preprocessor_state_path}. "
-                    "Process the train split first so the test split can reuse the fitted preprocessor."
+        if self.name == "nsl-kdd":
+            raw_file = os.path.join(self.raw_dir, self.raw_file_names[0])
+            if not os.path.exists(raw_file):
+                raise FileNotFoundError(f"Raw data file not found: {raw_file}")
+
+            preprocessor = NSLKDDPreprocessor()
+            if self.split == "train":
+                df = preprocessor.load_data(raw_file)
+                X, y = preprocessor.preprocess(df, fit=True)
+            else:
+                preprocessor_state_path = os.path.join(
+                    self.processed_dir, self.PREPROCESSOR_STATE_FILE
                 )
-            preprocessor.load_preprocessed(preprocessor_state_path)
-            df = preprocessor.load_data(raw_file)
-            X, y = preprocessor.preprocess(df, fit=False)
+                if not os.path.exists(preprocessor_state_path):
+                    raise FileNotFoundError(
+                        f"Preprocessor state not found: {preprocessor_state_path}. "
+                        "Process the train split first so the test split can reuse the fitted preprocessor."
+                    )
+                preprocessor.load_preprocessed(preprocessor_state_path)
+                df = preprocessor.load_data(raw_file)
+                X, y = preprocessor.preprocess(df, fit=False)
+        elif self.name == "cicids2017":
+            preprocessor = CICIDS2017Preprocessor()
+            df = preprocessor.load_data(self.raw_dir)
+            split_indices = self._load_or_create_cicids2017_split_indices(len(df))
+
+            if self.split == "train":
+                df = df.iloc[split_indices["train"]].reset_index(drop=True)
+                X, y = preprocessor.preprocess(df, fit=True)
+            else:
+                preprocessor_state_path = os.path.join(
+                    self.processed_dir, self.PREPROCESSOR_STATE_FILE
+                )
+                if not os.path.exists(preprocessor_state_path):
+                    raise FileNotFoundError(
+                        f"Preprocessor state not found: {preprocessor_state_path}. "
+                        "Process the train split first so the test split can reuse the fitted preprocessor."
+                    )
+                preprocessor.load_preprocessed(preprocessor_state_path)
+                df = df.iloc[split_indices["test"]].reset_index(drop=True)
+                X, y = preprocessor.preprocess(df, fit=False)
+        else:
+            raise ValueError(f"Unknown dataset: {self.name}")
 
         # Save train preprocessor state
         Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
@@ -155,9 +212,10 @@ class NetworkFlowDataset(InMemoryDataset):
             )
             state = {
                 "scaler": preprocessor.scaler,
-                "label_encoders": preprocessor.label_encoders,
                 "feature_names": preprocessor.feature_names,
             }
+            if hasattr(preprocessor, "label_encoders"):
+                state["label_encoders"] = preprocessor.label_encoders
             with open(state_path, "wb") as f:
                 pickle.dump(state, f)
             logger.info(f"Saved preprocessor state to {state_path}")

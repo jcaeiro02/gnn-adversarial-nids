@@ -390,6 +390,192 @@ class NSLKDDPreprocessor:
             raise
 
 
+class CICIDS2017Preprocessor:
+    """Preprocessor for CICIDS2017 dataset.
+
+    This preprocessor loads one or more CSV files from a CICIDS2017 raw directory,
+    filters out non-numeric identifiers, encodes labels into binary classes, and
+    normalizes numeric flow features with StandardScaler.
+    """
+
+    LABEL_CANDIDATES = {"label", "flow label"}
+    IGNORE_COLUMNS = {
+        "flow id",
+        "source ip",
+        "destination ip",
+        "timestamp",
+        "simillarhttp",
+    }
+
+    def __init__(self):
+        self.scaler = None
+        self.feature_names = None
+        logger.info("CICIDS2017Preprocessor initialized")
+
+    def load_data(self, raw_dir: str) -> pd.DataFrame:
+        """Load CICIDS2017 CSV files from the raw directory.
+
+        Args:
+            raw_dir: Directory containing one or more CICIDS2017 CSV files.
+
+        Returns:
+            Concatenated DataFrame from all CSV files.
+        """
+        raw_dir = Path(raw_dir)
+        if not raw_dir.exists():
+            raise FileNotFoundError(f"CICIDS2017 raw directory not found: {raw_dir}")
+
+        csv_files = sorted(raw_dir.glob("*.csv"))
+        if len(csv_files) == 0:
+            raise FileNotFoundError(
+                f"No CICIDS2017 CSV files found in {raw_dir}. "
+                "Place one or more *.csv files in this directory."
+            )
+
+        data_frames = []
+        for csv_path in csv_files:
+            logger.info(f"Loading CICIDS2017 CSV file: {csv_path}")
+            df = pd.read_csv(csv_path)
+            df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
+            data_frames.append(df)
+
+        combined = pd.concat(data_frames, ignore_index=True)
+        logger.info(f"Loaded {len(combined)} CICIDS2017 samples from {len(csv_files)} file(s)")
+        return combined
+
+    def _normalize_column_names(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
+        return df
+
+    def _find_label_column(self, columns: pd.Index) -> str:
+        for col in columns:
+            if isinstance(col, str) and col.strip().lower() in self.LABEL_CANDIDATES:
+                return col
+        raise ValueError(
+            "CICIDS2017 label column not found. Expected 'Label' or 'Flow Label'."
+        )
+
+    def _drop_identifier_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        cols_to_drop = [
+            col
+            for col in df.columns
+            if isinstance(col, str) and col.strip().lower() in self.IGNORE_COLUMNS
+        ]
+        if cols_to_drop:
+            logger.info(f"Dropping identifier columns: {cols_to_drop}")
+            df = df.drop(columns=cols_to_drop, errors="ignore")
+        return df
+
+    def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.replace([np.inf, -np.inf], np.nan)
+
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if df[col].isnull().any():
+                median_val = df[col].median()
+                df[col] = df[col].fillna(median_val)
+                logger.info(f"Filled missing values in {col} with median: {median_val}")
+
+        return df
+
+    def _convert_labels(self, labels: pd.Series) -> pd.Series:
+        labels = labels.astype(str).str.strip().str.upper()
+        binary_labels = labels.apply(lambda x: 0 if x == "BENIGN" else 1).astype(np.int64)
+
+        unknown_labels = labels[~labels.isin({"BENIGN"})]
+        if len(unknown_labels) > 0:
+            logger.info(
+                "Converted %d attack labels to binary 1 and %d benign labels to binary 0",
+                int((binary_labels == 1).sum()),
+                int((binary_labels == 0).sum()),
+            )
+
+        return binary_labels
+
+    def _select_numeric_features(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+        label_column = self._find_label_column(df.columns)
+        labels = df[label_column].copy()
+
+        df_features = df.drop(columns=[label_column], errors="ignore")
+        df_features = self._drop_identifier_columns(df_features)
+
+        # Convert all remaining columns to numeric where possible.
+        for col in df_features.columns:
+            if df_features[col].dtype == object:
+                df_features[col] = pd.to_numeric(df_features[col], errors="coerce")
+
+        # Keep only numeric features and drop fully empty columns.
+        df_features = df_features.select_dtypes(include=[np.number])
+        df_features = df_features.loc[:, df_features.notna().any(axis=0)]
+
+        if df_features.shape[1] == 0:
+            raise ValueError("No numeric CICIDS2017 features found after preprocessing.")
+
+        return df_features, labels
+
+    def _normalize_features(self, X: pd.DataFrame, fit: bool = True) -> np.ndarray:
+        if fit:
+            self.scaler = StandardScaler()
+            X_normalized = self.scaler.fit_transform(X)
+            logger.info(f"Fitted StandardScaler on {X.shape[1]} CICIDS2017 features")
+        else:
+            if self.scaler is None:
+                raise ValueError("Scaler not fitted. Call preprocess(fit=True) first.")
+            X_normalized = self.scaler.transform(X)
+            logger.info("Transformed CICIDS2017 features using fitted scaler")
+        return X_normalized
+
+    def preprocess(self, df: pd.DataFrame, fit: bool = True) -> tuple[np.ndarray, np.ndarray]:
+        df = self._normalize_column_names(df)
+        df = self._handle_missing_values(df)
+        X_df, y_series = self._select_numeric_features(df)
+
+        self.feature_names = X_df.columns.tolist()
+        X = self._normalize_features(X_df, fit=fit).astype(np.float32)
+        y = self._convert_labels(y_series).to_numpy(dtype=np.int64)
+
+        logger.info(
+            f"CICIDS2017 preprocessing complete: X shape={X.shape}, y shape={y.shape}"
+        )
+        return X, y
+
+    def save_preprocessed(self, X: np.ndarray, y: np.ndarray, output_dir: str) -> tuple[str, str]:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        X_path = output_dir / "X_preprocessed.npy"
+        np.save(X_path, X)
+        logger.info(f"Saved X to {X_path}")
+
+        y_path = output_dir / "y_preprocessed.npy"
+        np.save(y_path, y)
+        logger.info(f"Saved y to {y_path}")
+
+        preprocessor_path = output_dir / "preprocessor_state.pkl"
+        state = {
+            "scaler": self.scaler,
+            "feature_names": self.feature_names,
+        }
+        with open(preprocessor_path, "wb") as f:
+            pickle.dump(state, f)
+        logger.info(f"Saved preprocessor state to {preprocessor_path}")
+
+        return str(X_path), str(y_path)
+
+    def load_preprocessed(self, state_path: str) -> None:
+        try:
+            state_path = Path(state_path)
+            with open(state_path, "rb") as f:
+                state = pickle.load(f)
+            self.scaler = state["scaler"]
+            self.feature_names = state["feature_names"]
+            logger.info(f"Loaded CICIDS2017 preprocessor state from {state_path}")
+        except Exception as e:
+            logger.error(f"Error loading CICIDS2017 preprocessor state: {e}")
+            raise
+
+
 if __name__ == "__main__":
     # Setup logging for testing
     logging.basicConfig(
