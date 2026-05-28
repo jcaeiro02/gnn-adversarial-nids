@@ -1,0 +1,41 @@
+config_file: configs/base_config.yaml
+dataset: nsl-kdd
+dry_run: true
+loaded_config:
+  train:
+    batch_size: 1
+    device: auto
+    epochs: 100
+    learning_rate: 0.001
+    patience: 15
+    seed: 42
+    weight_decay: 0.0005
+    window_size: 1000
+model: gcn
+run_id: 20260528_222057_nsl-kdd_gcn
+runtime_config:
+  batch_size: 1
+  device: auto
+  dropout: 0.5
+  epochs: 100
+  hidden_dim: 64
+  learning_rate: 0.001
+  patience: 15
+  weight_decay: 0.0005
+  window_size: 1000
+split_config:
+  dataset_name: nsl-kdd
+  metadata:
+    nsl_kdd_policy: official_test
+    test_df_source: KDDTest+.txt
+    test_indices_relative_to: KDDTest+.txt
+    train_df_source: KDDTrain+.txt
+    train_indices_relative_to: KDDTrain+.txt
+    validation_indices_relative_to: KDDTrain+.txt
+  random_state: 42
+  test_size: 22544
+  total_size: 22584
+  train_size: 34
+  validation_size: 6
+split_metadata_path: data/splits/nsl-kdd/split_config.json
+timestamp: '20260528'

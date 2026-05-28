@@ -1,0 +1,26 @@
+config_file: configs/base_config.yaml
+dataset: cicids2017
+dry_run: false
+loaded_config:
+  train:
+    batch_size: 1
+    device: auto
+    epochs: 100
+    learning_rate: 0.001
+    patience: 15
+    seed: 42
+    weight_decay: 0.0005
+    window_size: 1000
+model: gcn
+run_id: 20260521_011311_cicids2017_gcn
+runtime_config:
+  batch_size: 1
+  device: auto
+  dropout: 0.5
+  epochs: 5
+  hidden_dim: 64
+  learning_rate: 0.001
+  patience: 15
+  weight_decay: 0.0005
+  window_size: 500
+timestamp: '20260521'
