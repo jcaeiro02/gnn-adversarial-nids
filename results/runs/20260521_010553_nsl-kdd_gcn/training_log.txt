@@ -1,0 +1,7 @@
+2026-05-21 01:05:53,527 - __main__ - INFO - Dry-run mode: using synthetic datasets for a minimal execution path.
+2026-05-21 01:05:53,557 - training.trainer - INFO - Saved checkpoint: results/runs/20260521_010553_nsl-kdd_gcn/best_checkpoint.pt
+2026-05-21 01:05:53,614 - __main__ - INFO - Baseline training complete.
+2026-05-21 01:05:53,615 - __main__ - INFO - Saved config: results/runs/20260521_010553_nsl-kdd_gcn/config.yaml
+2026-05-21 01:05:53,615 - __main__ - INFO - Saved metrics: results/runs/20260521_010553_nsl-kdd_gcn/metrics.json
+2026-05-21 01:05:53,616 - __main__ - INFO - Saved summary: results/runs/20260521_010553_nsl-kdd_gcn/summary.csv
+2026-05-21 01:05:53,617 - __main__ - INFO - Saved checkpoint: results/runs/20260521_010553_nsl-kdd_gcn/best_checkpoint.pt

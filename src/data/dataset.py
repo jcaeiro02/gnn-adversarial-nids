@@ -12,10 +12,12 @@ from typing import Optional, Tuple, List
 import pickle
 import torch
 from torch_geometric.data import InMemoryDataset, Data
+import torch_geometric.data.data as pyg_data
 
 from .download import DatasetDownloader
 from .preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from .graph_builder import FlowGraphBuilder
+from .splits import SplitManager
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +45,12 @@ class NetworkFlowDataset(InMemoryDataset):
 
         Args:
             root: Root directory for saving processed data.
-            name: Dataset name ('nsl-kdd' currently supported).
-            split: Dataset split ('train' or 'test').
+            name: Dataset name ('nsl-kdd' or 'cicids2017').
+            split: Dataset split ('train', 'validation', or 'test').
             transform: PyG transform to apply to data.
             pre_transform: PyG pre-transform to apply to data.
             rebuild: Force rebuild of processed data.
+            window_size: Window size for graph construction.
         """
         self.name = name
         self.split = split
@@ -90,7 +93,9 @@ class NetworkFlowDataset(InMemoryDataset):
     def raw_file_names(self) -> List[str]:
         """Return list of raw file names."""
         if self.name == "nsl-kdd":
-            return ["KDDTrain+.txt"] if self.split == "train" else ["KDDTest+.txt"]
+            # For NSL-KDD, we always load both train and test files,
+            # and use SplitManager to split them
+            return ["KDDTrain+.txt", "KDDTest+.txt"]
 
         raw_dir = Path(self.raw_dir)
         if not raw_dir.exists():
@@ -154,19 +159,62 @@ class NetworkFlowDataset(InMemoryDataset):
         return split_indices
 
     def process(self) -> None:
-        """Process raw data into PyG graph format."""
+        """Process raw data into PyG graph format with formal splits."""
         logger.info(f"Processing {self.name} dataset ({self.split} split)...")
 
         # Load and preprocess data
         logger.info("Loading and preprocessing raw data...")
+        root_path = Path(self._root_path)
+        if root_path.name == "graphs" and root_path.parent.name == "data":
+            split_dir = str(root_path.parent / "splits")
+        else:
+            split_dir = str(root_path / "splits")
+        
         if self.name == "nsl-kdd":
-            raw_file = os.path.join(self.raw_dir, self.raw_file_names[0])
-            if not os.path.exists(raw_file):
-                raise FileNotFoundError(f"Raw data file not found: {raw_file}")
-
+            # For NSL-KDD, load both train and test files, create formal splits
+            train_file = os.path.join(self.raw_dir, "KDDTrain+.txt")
+            test_file = os.path.join(self.raw_dir, "KDDTest+.txt")
+            
+            if not os.path.exists(train_file):
+                raise FileNotFoundError(f"Raw data file not found: {train_file}")
+            if not os.path.exists(test_file):
+                raise FileNotFoundError(f"Raw data file not found: {test_file}")
+            
             preprocessor = NSLKDDPreprocessor()
+            
+            # Load train and test dataframes
+            train_df = preprocessor.load_data(train_file)
+            test_df = preprocessor.load_data(test_file)
+            
+            # Create or load splits using SplitManager
+            split_manager = SplitManager(self.name, data_dir=split_dir)
+            train_indices, val_indices, test_indices = split_manager.create_or_load_splits(
+                dataset_name=self.name,
+                train_df=train_df,
+                test_df=test_df,
+            )
+            
+            # Get the appropriate split indices
             if self.split == "train":
-                df = preprocessor.load_data(raw_file)
+                indices = train_indices
+                full_df = train_df
+                fit_preprocessor = True
+            elif self.split == "validation":
+                indices = val_indices
+                full_df = train_df
+                fit_preprocessor = False
+            elif self.split == "test":
+                indices = test_indices
+                full_df = test_df
+                fit_preprocessor = False
+            else:
+                raise ValueError(f"Invalid split: {self.split}")
+            
+            # Apply split indices
+            df = full_df.iloc[indices].reset_index(drop=True)
+            
+            # Load or fit preprocessor
+            if fit_preprocessor:
                 X, y = preprocessor.preprocess(df, fit=True)
             else:
                 preprocessor_state_path = os.path.join(
@@ -175,19 +223,52 @@ class NetworkFlowDataset(InMemoryDataset):
                 if not os.path.exists(preprocessor_state_path):
                     raise FileNotFoundError(
                         f"Preprocessor state not found: {preprocessor_state_path}. "
-                        "Process the train split first so the test split can reuse the fitted preprocessor."
+                        "Process the train split first so validation/test splits can reuse the fitted preprocessor."
                     )
                 preprocessor.load_preprocessed(preprocessor_state_path)
-                df = preprocessor.load_data(raw_file)
                 X, y = preprocessor.preprocess(df, fit=False)
+                
         elif self.name == "cicids2017":
+            # For CICIDS2017, load all CSVs and create formal splits
             preprocessor = CICIDS2017Preprocessor()
             df = preprocessor.load_data(self.raw_dir)
-            split_indices = self._load_or_create_cicids2017_split_indices(len(df))
+            
+            # Create or load splits using SplitManager
+            split_manager = SplitManager(self.name, data_dir=split_dir)
+            train_indices, val_indices, test_indices = split_manager.create_or_load_splits(
+                dataset_name=self.name,
+                train_df=df,
+            )
 
+            # Persist legacy CICIDS2017 split indices for backward compatibility
+            legacy_split_path = os.path.join(self.raw_dir, self.CICIDS2017_SPLIT_STATE_FILE)
+            legacy_split_indices = {
+                "train": np.concatenate([train_indices, val_indices]),
+                "test": test_indices,
+            }
+            with open(legacy_split_path, "wb") as f:
+                pickle.dump(legacy_split_indices, f)
+            logger.info(f"Saved legacy CICIDS2017 split indices to {legacy_split_path}")
+            
+            # Get the appropriate split indices
             if self.split == "train":
-                df = df.iloc[split_indices["train"]].reset_index(drop=True)
-                X, y = preprocessor.preprocess(df, fit=True)
+                indices = train_indices
+                fit_preprocessor = True
+            elif self.split == "validation":
+                indices = val_indices
+                fit_preprocessor = False
+            elif self.split == "test":
+                indices = test_indices
+                fit_preprocessor = False
+            else:
+                raise ValueError(f"Invalid split: {self.split}")
+            
+            # Apply split indices
+            df_split = df.iloc[indices].reset_index(drop=True)
+            
+            # Load or fit preprocessor
+            if fit_preprocessor:
+                X, y = preprocessor.preprocess(df_split, fit=True)
             else:
                 preprocessor_state_path = os.path.join(
                     self.processed_dir, self.PREPROCESSOR_STATE_FILE
@@ -195,15 +276,14 @@ class NetworkFlowDataset(InMemoryDataset):
                 if not os.path.exists(preprocessor_state_path):
                     raise FileNotFoundError(
                         f"Preprocessor state not found: {preprocessor_state_path}. "
-                        "Process the train split first so the test split can reuse the fitted preprocessor."
+                        "Process the train split first so validation/test splits can reuse the fitted preprocessor."
                     )
                 preprocessor.load_preprocessed(preprocessor_state_path)
-                df = df.iloc[split_indices["test"]].reset_index(drop=True)
-                X, y = preprocessor.preprocess(df, fit=False)
+                X, y = preprocessor.preprocess(df_split, fit=False)
         else:
             raise ValueError(f"Unknown dataset: {self.name}")
 
-        # Save train preprocessor state
+        # Save train preprocessor state (only for train split)
         Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
         if self.split == "train":
             state_path = os.path.join(
@@ -316,7 +396,14 @@ class NetworkFlowDataset(InMemoryDataset):
         """Load processed graphs into memory from existing processed files."""
         data_path = os.path.join(self.processed_dir, f"data_{self.split}.pt")
         if os.path.exists(data_path):
-            data, slices = torch.load(data_path)
+            try:
+                with torch.serialization.safe_globals([
+                    pyg_data.DataEdgeAttr,
+                    pyg_data.Data,
+                ]):
+                    data, slices = torch.load(data_path)
+            except Exception:
+                data, slices = torch.load(data_path, weights_only=False)
             self.data = data
             self.slices = slices
             self.load_statistics()
@@ -354,9 +441,10 @@ class NetworkFlowDataset(InMemoryDataset):
 
         Args:
             name: Dataset name.
-            split: Dataset split ('train' or 'test').
+            split: Dataset split ('train', 'validation', or 'test').
             root: Root directory for saving processed data.
             rebuild: Force rebuild of processed data.
+            window_size: Window size for graph construction.
 
         Returns:
             NetworkFlowDataset instance.
@@ -364,8 +452,8 @@ class NetworkFlowDataset(InMemoryDataset):
         Raises:
             ValueError: If split is invalid.
         """
-        if split not in ["train", "test"]:
-            raise ValueError(f"Invalid split: {split}. Must be 'train' or 'test'")
+        if split not in ["train", "validation", "test"]:
+            raise ValueError(f"Invalid split: {split}. Must be 'train', 'validation', or 'test'")
 
         logger.info(f"Creating dataset: name={name}, split={split}, root={root}")
 
@@ -390,18 +478,19 @@ def load_split_datasets(
     root: str = "data/graphs",
     rebuild: bool = False,
     window_size: int = 1000,
-) -> Tuple[NetworkFlowDataset, NetworkFlowDataset]:
-    """Load both train and test datasets.
+) -> Tuple[NetworkFlowDataset, NetworkFlowDataset, NetworkFlowDataset]:
+    """Load train, validation, and test datasets with formal split protocol.
 
     Args:
         name: Dataset name.
         root: Root directory.
         rebuild: Force rebuild.
+        window_size: Window size for graph construction.
 
     Returns:
-        Tuple of (train_dataset, test_dataset).
+        Tuple of (train_dataset, validation_dataset, test_dataset).
     """
-    logger.info(f"Loading train and test datasets for {name}...")
+    logger.info(f"Loading train, validation, and test datasets for {name}...")
 
     train_dataset = NetworkFlowDataset.create_dataset(
         name=name,
@@ -410,20 +499,27 @@ def load_split_datasets(
         rebuild=rebuild,
         window_size=window_size,
     )
+    validation_dataset = NetworkFlowDataset.create_dataset(
+        name=name,
+        split="validation",
+        root=root,
+        rebuild=False,
+        window_size=window_size,
+    )
     test_dataset = NetworkFlowDataset.create_dataset(
         name=name,
         split="test",
         root=root,
-        rebuild=rebuild,
+        rebuild=False,
         window_size=window_size,
     )
 
     logger.info(
         f"Datasets loaded: train={len(train_dataset)} samples, "
-        f"test={len(test_dataset)} samples"
+        f"validation={len(validation_dataset)} samples, test={len(test_dataset)} samples"
     )
 
-    return train_dataset, test_dataset
+    return train_dataset, validation_dataset, test_dataset
 
 
 if __name__ == "__main__":

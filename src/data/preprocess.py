@@ -229,8 +229,18 @@ class NSLKDDPreprocessor:
                 if col not in self.label_encoders:
                     raise ValueError(f"Encoder for {col} not fitted. Call preprocess(fit=True) first.")
                 encoder = self.label_encoders[col]
-                df[col] = encoder.transform(df[col].astype(str))
-                logger.info(f"Transformed {col} using fitted encoder")
+                values = df[col].astype(str).tolist()
+                try:
+                    df[col] = encoder.transform(values)
+                except ValueError:
+                    unknown_index = len(encoder.classes_)
+                    mapping = {label: idx for idx, label in enumerate(encoder.classes_)}
+                    df[col] = [mapping.get(val, unknown_index) for val in values]
+                    logger.info(
+                        f"Transformed {col} using fitted encoder; unseen labels mapped to index {unknown_index}"
+                    )
+                else:
+                    logger.info(f"Transformed {col} using fitted encoder")
 
         return df
 

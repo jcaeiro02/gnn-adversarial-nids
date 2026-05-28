@@ -75,18 +75,6 @@ def build_synthetic_graphs(
     return graphs
 
 
-def build_dataset_splits(dataset: Any, seed: int, validation_ratio: float = 0.1):
-    from torch.utils.data import random_split
-
-    if len(dataset) < 2:
-        return dataset, dataset
-
-    val_size = max(1, int(len(dataset) * validation_ratio))
-    train_size = len(dataset) - val_size
-    generator = torch.Generator().manual_seed(seed)
-    return random_split(dataset, [train_size, val_size], generator=generator)
-
-
 def save_metrics_json(metrics: dict, output_dir: Path, filename: str = "metrics.json") -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / filename
@@ -162,17 +150,18 @@ def run_training(args: argparse.Namespace) -> dict:
     try:
         if args.dry_run:
             train_dataset = build_synthetic_graphs(num_graphs=2, num_nodes=16, num_node_features=12)
+            val_dataset = build_synthetic_graphs(num_graphs=1, num_nodes=16, num_node_features=12)
             test_dataset = build_synthetic_graphs(num_graphs=1, num_nodes=16, num_node_features=12)
             logger.info("Dry-run mode: using synthetic datasets for a minimal execution path.")
         else:
-            train_dataset, test_dataset = load_split_datasets(
+            # Load formal train/validation/test splits
+            train_dataset, val_dataset, test_dataset = load_split_datasets(
                 name=args.dataset,
                 root="data/graphs",
                 rebuild=args.rebuild_data,
                 window_size=window_size,
             )
 
-        train_dataset_split, val_dataset = build_dataset_splits(train_dataset, seed=seed)
         num_node_features = (
             train_dataset[0].x.shape[1]
             if not args.dry_run
@@ -196,11 +185,19 @@ def run_training(args: argparse.Namespace) -> dict:
             batch_size=training_config["batch_size"],
         )
 
-        fit_result = trainer.fit(train_dataset_split, val_dataset=val_dataset, dry_run=args.dry_run)
+        # Training with validation for early stopping
+        fit_result = trainer.fit(train_dataset, val_dataset=val_dataset, dry_run=args.dry_run)
 
+        # Evaluation on all splits
         train_metrics = trainer.evaluate(train_dataset)
-        test_metrics = trainer.evaluate(test_dataset)
         val_metrics = trainer.evaluate(val_dataset)
+        test_metrics = trainer.evaluate(test_dataset)
+
+        # Get split information for metadata
+        from data.splits import SplitManager
+        split_manager = SplitManager(args.dataset, data_dir="data/splits")
+        split_config = split_manager.load_split_config() if split_manager.splits_exist() else {}
+        split_metadata_path = str(split_manager.split_dir / "split_config.json")
 
         full_config = {
             "run_id": run_id,
@@ -210,6 +207,8 @@ def run_training(args: argparse.Namespace) -> dict:
             "dry_run": args.dry_run,
             "config_file": str(DEFAULT_CONFIG_PATH),
             "loaded_config": config,
+            "split_metadata_path": split_metadata_path,
+            "split_config": split_config,
             "runtime_config": {
                 "epochs": training_config["epochs"],
                 "learning_rate": training_config["learning_rate"],

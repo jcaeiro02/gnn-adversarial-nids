@@ -184,7 +184,7 @@ class TestNSLKDDPreprocessor(unittest.TestCase):
         
         # Introduce missing values
         df.iloc[0, 0] = np.nan
-        df.iloc[1, 1] = np.inf
+        df.iloc[1, 4] = np.inf
         
         X, y = self.preprocessor.preprocess(df, fit=True)
         
@@ -556,6 +556,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
         # Note: This test creates dataset but doesn't actually download
         # since we're using local raw files.
         self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
         dataset = NetworkFlowDataset.create_dataset(
             name="nsl-kdd",
             split="train",
@@ -647,6 +648,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
     def test_train_split_fits_preprocessor(self):
         """Test that train split fits the preprocessor state."""
         self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
         dataset = NetworkFlowDataset.create_dataset(
             name="nsl-kdd",
             split="train",
@@ -769,6 +771,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
     def test_processed_cache_loads_without_reprocessing(self):
         """Test that processed data is loaded from cache when rebuild=False."""
         self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
         NetworkFlowDataset.create_dataset(
             name="nsl-kdd",
             split="train",
@@ -793,6 +796,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
     def test_rebuild_forces_reprocessing(self):
         """Test that rebuild=True forces dataset reprocessing."""
         self._write_raw_split("train", 40)
+        self._write_raw_split("test", 40)
         NetworkFlowDataset.create_dataset(
             name="nsl-kdd",
             split="train",
@@ -816,6 +820,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
     def test_dataset_length_matches_window_count(self):
         """Test that dataset length equals the number of graph windows."""
         self._write_raw_split("train", 45)
+        self._write_raw_split("test", 40)
         dataset = NetworkFlowDataset.create_dataset(
             name="nsl-kdd",
             split="train",
@@ -824,7 +829,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
             window_size=20,
         )
 
-        self.assertEqual(len(dataset), 3)
+        self.assertEqual(len(dataset), 2)
         logger.info("✓ Dataset length window count test passed")
 
 
@@ -917,6 +922,393 @@ class TestIntegration(unittest.TestCase):
         self.assertEqual(graphs[1].x.shape[0], 30)
 
         logger.info("✓ Multiple graphs integration test passed")
+
+
+class TestSplitManager(unittest.TestCase):
+    """Tests for the SplitManager class."""
+
+    def setUp(self):
+        """Setup for split manager tests."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.splits_dir = Path(self.temp_dir) / "splits"
+        
+    def tearDown(self):
+        """Clean up."""
+        shutil.rmtree(self.temp_dir)
+
+    def _create_nsl_kdd_dataframes(self, train_size: int = 100, test_size: int = 50):
+        """Create synthetic NSL-KDD train and test dataframes."""
+        def create_df(n_samples):
+            protocols = ["tcp", "udp", "icmp"]
+            services = ["http", "ftp", "ssh"]
+            flags = ["SF", "S0", "S1"]
+            labels = ["normal", "dos"]
+            
+            data = []
+            for i in range(n_samples):
+                row = {
+                    "protocol": protocols[i % len(protocols)],
+                    "service": services[i % len(services)],
+                    "flag": flags[i % len(flags)],
+                }
+                # Add numeric features
+                for j in range(38):
+                    row[f"feature_{j}"] = float(i * 0.1 + j)
+                row["label"] = labels[i % len(labels)]
+                data.append(row)
+            
+            return pd.DataFrame(data)
+        
+        return create_df(train_size), create_df(test_size)
+
+    def _create_cicids2017_dataframe(self, n_samples: int = 100):
+        """Create synthetic CICIDS2017 dataframe."""
+        data = []
+        for i in range(n_samples):
+            row = {
+                "Flow ID": f"flow-{i}",
+                "Source IP": "192.168.0.1",
+                "Destination IP": "10.0.0.1",
+            }
+            # Add numeric features
+            for j in range(15):
+                row[f"feature_{j}"] = float(i * 0.1 + j)
+            row["label"] = "BENIGN" if i % 2 == 0 else "DDoS"
+            data.append(row)
+        
+        return pd.DataFrame(data)
+
+    def test_split_manager_initialization(self):
+        """Test SplitManager initialization."""
+        from data.splits import SplitManager
+        
+        manager = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        self.assertEqual(manager.dataset_name, "nsl-kdd")
+        self.assertEqual(manager.random_state, 42)
+        self.assertTrue(manager.split_dir.exists())
+        logger.info("✓ SplitManager initialization test passed")
+
+    def test_nsl_kdd_split_creation(self):
+        """Test NSL-KDD split creation."""
+        from data.splits import SplitManager
+        
+        train_df, test_df = self._create_nsl_kdd_dataframes(100, 50)
+        
+        manager = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        train_idx, val_idx, test_idx = manager.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        # Verify split sizes
+        self.assertGreater(len(train_idx), 0)
+        self.assertGreater(len(val_idx), 0)
+        self.assertEqual(len(test_idx), 50)  # All test samples
+        self.assertEqual(len(train_idx) + len(val_idx), 100)  # All train samples
+        
+        logger.info("✓ NSL-KDD split creation test passed")
+
+    def test_cicids2017_split_creation(self):
+        """Test CICIDS2017 split creation."""
+        from data.splits import SplitManager
+        
+        df = self._create_cicids2017_dataframe(100)
+        
+        manager = SplitManager("cicids2017", data_dir=str(self.splits_dir))
+        train_idx, val_idx, test_idx = manager.create_or_load_splits(
+            "cicids2017",
+            train_df=df
+        )
+        
+        # Verify split sizes approximately match ratios
+        total = len(train_idx) + len(val_idx) + len(test_idx)
+        self.assertEqual(total, 100)
+        
+        # Check approximate ratios (70%, 15%, 15%)
+        train_ratio = len(train_idx) / total
+        val_ratio = len(val_idx) / total
+        test_ratio = len(test_idx) / total
+        
+        self.assertAlmostEqual(train_ratio, 0.70, delta=0.05)
+        self.assertAlmostEqual(val_ratio, 0.15, delta=0.05)
+        self.assertAlmostEqual(test_ratio, 0.15, delta=0.05)
+        
+        logger.info("✓ CICIDS2017 split creation test passed")
+
+    def test_splits_are_persisted(self):
+        """Test that splits are persisted to disk."""
+        from data.splits import SplitManager
+        
+        train_df, test_df = self._create_nsl_kdd_dataframes(100, 50)
+        
+        manager = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        manager.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        # Check files exist
+        self.assertTrue((manager.split_dir / "train_indices.npy").exists())
+        self.assertTrue((manager.split_dir / "validation_indices.npy").exists())
+        self.assertTrue((manager.split_dir / "test_indices.npy").exists())
+        self.assertTrue((manager.split_dir / "split_config.json").exists())
+        
+        logger.info("✓ Splits persisted test passed")
+
+    def test_splits_are_deterministic(self):
+        """Test that splits are deterministic with same random_state."""
+        from data.splits import SplitManager
+        
+        train_df, test_df = self._create_nsl_kdd_dataframes(100, 50)
+        
+        manager1 = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        train_idx1, val_idx1, test_idx1 = manager1.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        # Clear splits
+        import shutil as shutil_module
+        shutil_module.rmtree(str(manager1.split_dir))
+        
+        # Create again
+        manager2 = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        train_idx2, val_idx2, test_idx2 = manager2.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        # Verify splits are identical
+        np.testing.assert_array_equal(train_idx1, train_idx2)
+        np.testing.assert_array_equal(val_idx1, val_idx2)
+        np.testing.assert_array_equal(test_idx1, test_idx2)
+        
+        logger.info("✓ Splits deterministic test passed")
+
+    def test_no_overlap_between_splits(self):
+        """Test that train/val/test splits have no overlap."""
+        from data.splits import SplitManager
+        
+        train_df, test_df = self._create_nsl_kdd_dataframes(100, 50)
+        
+        manager = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        train_idx, val_idx, test_idx = manager.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        # NSL-KDD: train and val share same source (KDDTrain+), test is separate
+        train_val_combined = np.concatenate([train_idx, val_idx])
+        overlap = np.intersect1d(train_idx, val_idx)
+        self.assertEqual(len(overlap), 0, "Train and validation should not overlap")
+        
+        logger.info("✓ No overlap between splits test passed")
+
+    def test_cicids2017_stratified_split_preserves_label_dist(self):
+        """Test that CICIDS2017 stratified split preserves label distribution."""
+        from data.splits import SplitManager
+        
+        df = self._create_cicids2017_dataframe(100)
+        
+        manager = SplitManager("cicids2017", data_dir=str(self.splits_dir))
+        train_idx, val_idx, test_idx = manager.create_or_load_splits(
+            "cicids2017",
+            train_df=df
+        )
+        
+        # Check label distribution is similar
+        full_labels = df["label"].values
+        full_benign_ratio = np.sum(full_labels == "BENIGN") / len(full_labels)
+        
+        train_benign_ratio = np.sum(full_labels[train_idx] == "BENIGN") / len(train_idx)
+        val_benign_ratio = np.sum(full_labels[val_idx] == "BENIGN") / len(val_idx)
+        test_benign_ratio = np.sum(full_labels[test_idx] == "BENIGN") / len(test_idx)
+        
+        # Ratios should be within ~10% of full distribution
+        self.assertAlmostEqual(train_benign_ratio, full_benign_ratio, delta=0.15)
+        self.assertAlmostEqual(val_benign_ratio, full_benign_ratio, delta=0.15)
+        self.assertAlmostEqual(test_benign_ratio, full_benign_ratio, delta=0.15)
+        
+        logger.info("✓ CICIDS2017 stratified split preserves label distribution test passed")
+
+    def test_load_split_config(self):
+        """Test loading split configuration."""
+        from data.splits import SplitManager
+        
+        train_df, test_df = self._create_nsl_kdd_dataframes(100, 50)
+        
+        manager = SplitManager("nsl-kdd", data_dir=str(self.splits_dir))
+        manager.create_or_load_splits(
+            "nsl-kdd",
+            train_df=train_df,
+            test_df=test_df
+        )
+        
+        config = manager.load_split_config()
+        
+        self.assertEqual(config["dataset_name"], "nsl-kdd")
+        self.assertEqual(config["random_state"], 42)
+        self.assertEqual(config["total_size"], 150)
+        self.assertEqual(config["test_size"], 50)
+        self.assertEqual(config["train_size"] + config["validation_size"], 100)
+        
+        logger.info("✓ Load split config test passed")
+
+
+class TestFormalSplitProtocol(unittest.TestCase):
+    """Tests for formal split protocol in NetworkFlowDataset."""
+
+    def setUp(self):
+        """Setup for formal split protocol tests."""
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        """Clean up."""
+        shutil.rmtree(self.temp_dir)
+
+    def _write_nsl_kdd_splits(self, train_samples: int = 100, test_samples: int = 50):
+        """Write NSL-KDD train and test files."""
+        raw_dir = Path(self.temp_dir) / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Write train file
+        train_data = []
+        for i in range(train_samples):
+            row = [str(i), "tcp", "http", "SF"] + [str(i * 0.1) for _ in range(37)] + ["normal" if i % 2 == 0 else "dos"]
+            train_data.append(",".join(row))
+        
+        with open(raw_dir / "KDDTrain+.txt", "w") as f:
+            f.write("\n".join(train_data))
+        
+        # Write test file
+        test_data = []
+        for i in range(test_samples):
+            row = [str(i), "udp", "ftp", "S0"] + [str(i * 0.2) for _ in range(37)] + ["normal" if i % 3 == 0 else "dos"]
+            test_data.append(",".join(row))
+        
+        with open(raw_dir / "KDDTest+.txt", "w") as f:
+            f.write("\n".join(test_data))
+
+    def test_train_validation_test_splits_loaded(self):
+        """Test that train, validation, and test splits are loaded correctly."""
+        self._write_nsl_kdd_splits(100, 50)
+        
+        # Load all three splits
+        train_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=50,
+        )
+        
+        val_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="validation",
+            root=self.temp_dir,
+            rebuild=False,
+            window_size=50,
+        )
+        
+        test_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="test",
+            root=self.temp_dir,
+            rebuild=False,
+            window_size=50,
+        )
+        
+        # All should have data
+        self.assertGreater(len(train_dataset), 0)
+        self.assertGreater(len(val_dataset), 0)
+        self.assertGreater(len(test_dataset), 0)
+        
+        logger.info("✓ Train/validation/test splits loaded test passed")
+
+    def test_load_split_datasets_returns_three_splits(self):
+        """Test that load_split_datasets returns train, validation, and test."""
+        from data.dataset import load_split_datasets
+        
+        self._write_nsl_kdd_splits(100, 50)
+        
+        train_dataset, val_dataset, test_dataset = load_split_datasets(
+            name="nsl-kdd",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=50,
+        )
+        
+        # All should have data
+        self.assertGreater(len(train_dataset), 0)
+        self.assertGreater(len(val_dataset), 0)
+        self.assertGreater(len(test_dataset), 0)
+        
+        logger.info("✓ load_split_datasets returns three splits test passed")
+
+    def test_validation_reuses_train_preprocessor(self):
+        """Test that validation split reuses the train preprocessor."""
+        self._write_nsl_kdd_splits(100, 50)
+        
+        # Load train first
+        train_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=50,
+        )
+        
+        # Load validation
+        val_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="validation",
+            root=self.temp_dir,
+            rebuild=False,
+            window_size=50,
+        )
+        
+        # Both should have same number of features
+        self.assertEqual(
+            train_dataset[0].x.shape[1],
+            val_dataset[0].x.shape[1]
+        )
+        
+        logger.info("✓ Validation reuses train preprocessor test passed")
+
+    def test_test_reuses_train_preprocessor(self):
+        """Test that test split reuses the train preprocessor."""
+        self._write_nsl_kdd_splits(100, 50)
+        
+        # Load train first
+        train_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="train",
+            root=self.temp_dir,
+            rebuild=True,
+            window_size=50,
+        )
+        
+        # Load test
+        test_dataset = NetworkFlowDataset.create_dataset(
+            name="nsl-kdd",
+            split="test",
+            root=self.temp_dir,
+            rebuild=False,
+            window_size=50,
+        )
+        
+        # Both should have same number of features
+        self.assertEqual(
+            train_dataset[0].x.shape[1],
+            test_dataset[0].x.shape[1]
+        )
+        
+        logger.info("✓ Test reuses train preprocessor test passed")
 
 
 if __name__ == "__main__":
