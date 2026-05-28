@@ -1,9 +1,0 @@
-2026-05-28 22:20:57,841 - __main__ - INFO - Dry-run mode: using synthetic datasets for a minimal execution path.
-2026-05-28 22:20:58,531 - training.trainer - INFO - Saved checkpoint: results/runs/20260528_222057_nsl-kdd_gcn/best_checkpoint.pt
-2026-05-28 22:20:58,559 - training.trainer - INFO - Saved checkpoint: results/runs/20260528_222057_nsl-kdd_gcn/best_checkpoint.pt
-2026-05-28 22:20:58,579 - data.splits - INFO - SplitManager initialized: dataset=nsl-kdd, split_dir=data/splits/nsl-kdd, random_state=42
-2026-05-28 22:20:58,603 - __main__ - INFO - Baseline training complete.
-2026-05-28 22:20:58,604 - __main__ - INFO - Saved config: results/runs/20260528_222057_nsl-kdd_gcn/config.yaml
-2026-05-28 22:20:58,604 - __main__ - INFO - Saved metrics: results/runs/20260528_222057_nsl-kdd_gcn/metrics.json
-2026-05-28 22:20:58,604 - __main__ - INFO - Saved summary: results/runs/20260528_222057_nsl-kdd_gcn/summary.csv
-2026-05-28 22:20:58,605 - __main__ - INFO - Saved checkpoint: results/runs/20260528_222057_nsl-kdd_gcn/best_checkpoint.pt

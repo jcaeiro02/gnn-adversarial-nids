@@ -1,2 +1,0 @@
-run_id,timestamp,dataset,model,epochs,window_size,hidden_dim,dropout,learning_rate,weight_decay,patience,batch_size,train_accuracy,train_f1,validation_accuracy,validation_f1,test_accuracy,test_f1,test_roc_auc,best_checkpoint
-20260521_010553_nsl-kdd_gcn,20260521,nsl-kdd,gcn,100,1000,64,0.5,0.001,0.0005,15,1,0.5,0.5,0.4375,0.18181818181818182,0.5625,0.22222222222222224,0.30158730158730157,results/runs/20260521_010553_nsl-kdd_gcn/best_checkpoint.pt
