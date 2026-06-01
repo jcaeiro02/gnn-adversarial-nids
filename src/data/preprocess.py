@@ -266,11 +266,15 @@ class NSLKDDPreprocessor:
         unique_counts = binary_labels.value_counts()
         logger.info(f"Label distribution after conversion:\n{unique_counts}")
 
-        # Check for unknown labels
+        # Check for labels not explicitly listed in ATTACK_TYPES
         unknown_mask = ~labels.str.lower().isin(self.ATTACK_TYPES.keys())
         if unknown_mask.any():
-            logger.warning(f"Found {unknown_mask.sum()} unknown labels")
-            logger.debug(f"Unknown labels: {labels[unknown_mask].unique()}")
+            unlisted_labels = labels[unknown_mask].unique()
+            logger.warning(
+                f"Found {unknown_mask.sum()} labels not explicitly listed in ATTACK_TYPES; "
+                f"safely mapped to attack class 1. Unlisted labels: {list(unlisted_labels)}"
+            )
+            logger.debug(f"Unlisted labels: {unlisted_labels}")
 
         df = df.drop([self.LABEL_COLUMN, self.DIFFICULTY_COLUMN], axis=1, errors="ignore")
         return df, binary_labels

@@ -209,7 +209,14 @@ class SplitManager:
 
         # Extract binary labels from train_df (normal=0, attack=1)
         # Assume labels are in the last column
-        train_labels = train_df.iloc[:, -1].values
+        # train_labels = train_df.iloc[:, -1].values
+
+        if "label" in train_df.columns:
+            train_labels = train_df["label"].astype(str).str.lower().apply(
+                lambda x: 0 if x == "normal" else 1
+            ).values
+        else:
+            train_labels = train_df.iloc[:, -1].values
 
         # Stratified split of training data into train and validation
         train_indices, val_indices = train_test_split(
