@@ -4,7 +4,10 @@ Produces per-split statistics, correlations, mutual information and a leakage re
 
 Usage (CLI):
     python scripts/analyze_dataset_features.py --dataset nsl-kdd
-    python scripts/analyze_dataset_features.py --dataset cicids2017
+    python scripts/analyze_dataset_features.py --dataset cicids2017-ddos
+    python scripts/analyze_dataset_features.py --dataset cicids2017-portscan
+    python scripts/analyze_dataset_features.py --dataset cicids2017-patator
+    python scripts/analyze_dataset_features.py --dataset cicids2017-selected
 
 The script reuses existing preprocessors and the SplitManager to ensure
 the same splits and encodings as the training pipeline.
@@ -34,6 +37,7 @@ from sklearn.feature_selection import mutual_info_classif
 
 from data.preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from data.splits import SplitManager
+from data.download import CICIDS2017_SUBSETS
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -95,7 +99,7 @@ def analyze_from_dataframes(
                 "validation": (validation_df.reset_index(drop=True), False),
                 "test": (test_df.reset_index(drop=True), False),
             }
-        elif dataset == "cicids2017":
+        elif dataset.startswith("cicids2017"):
             preprocessor = CICIDS2017Preprocessor()
             splits = {
                 "train": (train_df.reset_index(drop=True), True),
@@ -120,10 +124,10 @@ def analyze_from_dataframes(
                 "validation": (train_df.iloc[val_indices].reset_index(drop=True), False),
                 "test": (test_df.iloc[test_indices].reset_index(drop=True), False),
             }
-        elif dataset == "cicids2017":
+        elif dataset.startswith("cicids2017"):
             preprocessor = CICIDS2017Preprocessor()
             train_indices, val_indices, test_indices = split_manager.create_or_load_splits(
-                dataset_name="cicids2017", train_df=train_df
+                dataset_name=dataset, train_df=train_df
             )
             full_df = train_df
             splits = {
@@ -296,7 +300,8 @@ def analyze_from_dataframes(
 
 def analyze_dataset_cli():
     p = argparse.ArgumentParser(description="Analyze dataset features and leakage.")
-    p.add_argument("--dataset", choices=["nsl-kdd", "cicids2017"], required=True)
+    cicids_choices = sorted(list(CICIDS2017_SUBSETS.keys()))
+    p.add_argument("--dataset", choices=["nsl-kdd"] + cicids_choices, required=True)
     p.add_argument("--output", default="results/analysis")
     args = p.parse_args()
 
@@ -318,7 +323,8 @@ def analyze_dataset_cli():
     else:
         pre = CICIDS2017Preprocessor()
         raw_dir = os.path.join("data/raw/cicids2017")
-        df = pre.load_data(raw_dir)
+        selected = CICIDS2017_SUBSETS.get(dataset)
+        df = pre.load_data(raw_dir, selected_files=selected)
         analyze_from_dataframes(
             dataset,
             df,

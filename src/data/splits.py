@@ -12,6 +12,7 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 from sklearn.model_selection import train_test_split
+from .download import CICIDS2017_SUBSETS
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ class SplitManager:
         """Initialize SplitManager.
 
         Args:
-            dataset_name: Name of the dataset ('nsl-kdd' or 'cicids2017').
+            dataset_name: Name of the dataset ('nsl-kdd' or explicit cicids2017 variant).
             data_dir: Base directory for split storage.
             random_state: Random seed for reproducibility.
         """
@@ -320,7 +321,7 @@ class SplitManager:
         """Create or load splits (main entry point).
 
         Args:
-            dataset_name: Dataset name ('nsl-kdd' or 'cicids2017').
+            dataset_name: Dataset name ('nsl-kdd' or explicit CICIDS2017 variant).
             train_df: Training dataframe (required for creation if splits don't exist).
             test_df: Test dataframe (required for NSL-KDD if splits don't exist).
             cicids2017_ratios: Dict with 'train', 'validation', 'test' keys (for CICIDS2017).
@@ -331,7 +332,8 @@ class SplitManager:
         Raises:
             ValueError: If dataset_name is invalid or required arguments missing.
         """
-        if dataset_name not in ["nsl-kdd", "cicids2017"]:
+        # Accept NSL-KDD and any explicit CICIDS2017 variant defined in CICIDS2017_SUBSETS
+        if dataset_name != "nsl-kdd" and dataset_name not in CICIDS2017_SUBSETS:
             raise ValueError(f"Unknown dataset: {dataset_name}")
 
         # Try to load existing splits
@@ -348,15 +350,17 @@ class SplitManager:
                     "train_df and test_df required for NSL-KDD split creation"
                 )
             self.create_nsl_kdd_splits(train_df, test_df)
-        elif dataset_name == "cicids2017":
+        else:
+            # Any CICIDS2017 variant uses the same split creation logic but
+            # splits are stored under a variant-specific directory.
             if train_df is None:
                 raise ValueError("train_df required for CICIDS2017 split creation")
-            
+
             ratios = cicids2017_ratios or {}
             train_ratio = ratios.get("train", 0.70)
             val_ratio = ratios.get("validation", 0.15)
             test_ratio = ratios.get("test", 0.15)
-            
+
             self.create_cicids2017_splits(
                 train_df,
                 train_ratio=train_ratio,

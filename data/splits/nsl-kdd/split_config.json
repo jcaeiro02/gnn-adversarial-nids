@@ -1,10 +1,10 @@
 {
   "dataset_name": "nsl-kdd",
   "random_state": 42,
-  "train_size": 34,
-  "validation_size": 6,
+  "train_size": 107077,
+  "validation_size": 18896,
   "test_size": 22544,
-  "total_size": 22584,
+  "total_size": 148517,
   "metadata": {
     "nsl_kdd_policy": "official_test",
     "train_df_source": "KDDTrain+.txt",

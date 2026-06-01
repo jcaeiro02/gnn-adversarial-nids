@@ -22,6 +22,7 @@ from data.dataset import load_split_datasets
 from models import GCN_NIDS, GAT_NIDS
 from training.trainer import Trainer
 from torch_geometric.data import Data
+from data.download import CICIDS2017_SUBSETS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -281,7 +282,12 @@ def run_training(args: argparse.Namespace) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train and evaluate a flow-centric GNN baseline.")
     parser.add_argument("--model", choices=["gcn", "gat"], default="gcn")
-    parser.add_argument("--dataset", choices=["nsl-kdd", "cicids2017"], default="nsl-kdd")
+    cicids_choices = sorted(list(CICIDS2017_SUBSETS.keys()))
+    parser.add_argument(
+        "--dataset",
+        choices=["nsl-kdd"] + cicids_choices,
+        default="nsl-kdd",
+    )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--window-size", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=64)

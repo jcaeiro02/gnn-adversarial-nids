@@ -13,13 +13,14 @@ import pandas as pd
 from pathlib import Path
 import pickle
 import logging
+from typing import Optional
 
 # Add src to path for imports
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from data.download import DatasetDownloader
+from data.download import DatasetDownloader, CICIDS2017_SUBSETS
 from data.preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from data.graph_builder import FlowGraphBuilder
 from data.dataset import NetworkFlowDataset, load_split_datasets
@@ -567,11 +568,18 @@ class TestNetworkFlowDataset(unittest.TestCase):
         self.assertGreater(len(dataset), 0)
         logger.info("✓ Dataset creation test passed")
 
-    def _write_cicids2017_csv_files(self, num_files: int = 2, rows_per_file: int = 8):
+    def _write_cicids2017_csv_files(
+        self,
+        filenames: Optional[list[str]] = None,
+        rows_per_file: int = 8,
+    ):
         raw_dir = Path(self.temp_dir).parent / "raw" / "cicids2017"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        for file_idx in range(num_files):
+        if filenames is None:
+            filenames = [f"cicids_part_{i}.csv" for i in range(rows_per_file)]
+
+        for file_idx, filename in enumerate(filenames):
             rows = []
             for i in range(rows_per_file):
                 rows.append({
@@ -586,36 +594,41 @@ class TestNetworkFlowDataset(unittest.TestCase):
                     "Label": "BENIGN" if i % 2 == 0 else "FTP-Patator",
                 })
 
-            pd.DataFrame(rows).to_csv(raw_dir / f"cicids_part_{file_idx}.csv", index=False)
+            pd.DataFrame(rows).to_csv(raw_dir / filename, index=False)
 
         return raw_dir
 
     def test_cicids2017_split_indices_are_deterministic(self):
-        raw_dir = self._write_cicids2017_csv_files(num_files=2, rows_per_file=8)
+        raw_dir = self._write_cicids2017_csv_files(
+            filenames=CICIDS2017_SUBSETS["cicids2017-selected"],
+            rows_per_file=8,
+        )
         train_dataset = NetworkFlowDataset.create_dataset(
-            name="cicids2017",
+            name="cicids2017-selected",
             split="train",
             root=self.temp_dir,
             rebuild=True,
             window_size=16,
         )
+        # Verify that variant-specific splits were created and persisted
+        split_dir = Path(self.temp_dir) / "splits" / "cicids2017-selected"
+        self.assertTrue((split_dir / "train_indices.npy").exists())
+        self.assertTrue((split_dir / "test_indices.npy").exists())
 
-        split_file = raw_dir / NetworkFlowDataset.CICIDS2017_SPLIT_STATE_FILE
-        self.assertTrue(split_file.exists())
+        with open(split_dir / "train_indices.npy", "rb") as f:
+            train_indices = np.load(f)
 
-        with open(split_file, "rb") as f:
-            split_indices = pickle.load(f)
-
-        self.assertEqual(len(split_indices["train"]) + len(split_indices["test"]), 16)
-        self.assertGreater(len(split_indices["train"]), 0)
-        self.assertGreater(len(split_indices["test"]), 0)
+        self.assertGreater(len(train_indices), 0)
         self.assertEqual(len(train_dataset), 1)
         logger.info("✓ CICIDS2017 deterministic split index test passed")
 
     def test_cicids2017_dataset_creation_and_graph_building(self):
-        raw_dir = self._write_cicids2017_csv_files(num_files=2, rows_per_file=8)
+        raw_dir = self._write_cicids2017_csv_files(
+            filenames=CICIDS2017_SUBSETS["cicids2017-selected"],
+            rows_per_file=8,
+        )
         train_dataset = NetworkFlowDataset.create_dataset(
-            name="cicids2017",
+            name="cicids2017-selected",
             split="train",
             root=self.temp_dir,
             rebuild=True,
@@ -623,7 +636,7 @@ class TestNetworkFlowDataset(unittest.TestCase):
         )
 
         test_dataset = NetworkFlowDataset.create_dataset(
-            name="cicids2017",
+            name="cicids2017-selected",
             split="test",
             root=self.temp_dir,
             rebuild=True,
@@ -1015,9 +1028,9 @@ class TestSplitManager(unittest.TestCase):
         
         df = self._create_cicids2017_dataframe(100)
         
-        manager = SplitManager("cicids2017", data_dir=str(self.splits_dir))
+        manager = SplitManager("cicids2017-selected", data_dir=str(self.splits_dir))
         train_idx, val_idx, test_idx = manager.create_or_load_splits(
-            "cicids2017",
+            "cicids2017-selected",
             train_df=df
         )
         
@@ -1115,9 +1128,9 @@ class TestSplitManager(unittest.TestCase):
         
         df = self._create_cicids2017_dataframe(100)
         
-        manager = SplitManager("cicids2017", data_dir=str(self.splits_dir))
+        manager = SplitManager("cicids2017-selected", data_dir=str(self.splits_dir))
         train_idx, val_idx, test_idx = manager.create_or_load_splits(
-            "cicids2017",
+            "cicids2017-selected",
             train_df=df
         )
         

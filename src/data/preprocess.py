@@ -426,19 +426,49 @@ class CICIDS2017Preprocessor:
         self.feature_names = None
         logger.info("CICIDS2017Preprocessor initialized")
 
-    def load_data(self, raw_dir: str) -> pd.DataFrame:
+    def load_data(self, raw_dir: str, selected_files: Optional[list[str]] = None) -> pd.DataFrame:
         """Load CICIDS2017 CSV files from the raw directory.
 
         Args:
             raw_dir: Directory containing one or more CICIDS2017 CSV files.
+            selected_files: Optional list of filenames (relative to raw_dir) to load.
 
         Returns:
-            Concatenated DataFrame from all CSV files.
+            Concatenated DataFrame from selected CSV files.
+
+        Raises:
+            FileNotFoundError: If the raw_dir doesn't exist or any selected file is missing.
         """
         raw_dir = Path(raw_dir)
         if not raw_dir.exists():
             raise FileNotFoundError(f"CICIDS2017 raw directory not found: {raw_dir}")
 
+        # If selected_files provided, validate and load only those files
+        if selected_files:
+            data_frames = []
+            missing = []
+            for fname in selected_files:
+                fpath = raw_dir / fname
+                if not fpath.exists():
+                    missing.append(fname)
+                    continue
+                logger.info(f"Loading CICIDS2017 CSV file: {fpath}")
+                df = pd.read_csv(fpath)
+                df.columns = [col.strip() if isinstance(col, str) else col for col in df.columns]
+                data_frames.append(df)
+
+            if missing:
+                raise FileNotFoundError(
+                    f"Missing required CICIDS2017 CSV files: {missing} in {raw_dir}"
+                )
+
+            combined = pd.concat(data_frames, ignore_index=True) if data_frames else pd.DataFrame()
+            logger.info(
+                f"Loaded {len(combined)} CICIDS2017 samples from {len(data_frames)} selected file(s)"
+            )
+            return combined
+
+        # Default behavior: load all CSV files in directory
         csv_files = sorted(raw_dir.glob("*.csv"))
         if len(csv_files) == 0:
             raise FileNotFoundError(

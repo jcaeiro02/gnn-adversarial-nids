@@ -1,2 +1,0 @@
-run_id,timestamp,dataset,model,epochs,window_size,hidden_dim,dropout,learning_rate,weight_decay,patience,batch_size,train_accuracy,train_f1,validation_accuracy,validation_f1,test_accuracy,test_f1,test_roc_auc,best_checkpoint
-20260521_011311_cicids2017_gcn,20260521,cicids2017,gcn,5,500,64,0.5,0.001,0.0005,15,1,0.9963565084497995,0.9967886147118538,0.9956666666666667,0.9961313361769666,0.9958581585417174,0.996352002497025,0.9996340641557335,results/runs/20260521_011311_cicids2017_gcn/best_checkpoint.pt

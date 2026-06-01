@@ -14,7 +14,7 @@ import torch
 from torch_geometric.data import InMemoryDataset, Data
 import torch_geometric.data.data as pyg_data
 
-from .download import DatasetDownloader
+from .download import DatasetDownloader, CICIDS2017_SUBSETS
 from .preprocess import NSLKDDPreprocessor, CICIDS2017Preprocessor
 from .graph_builder import FlowGraphBuilder
 from .splits import SplitManager
@@ -45,7 +45,7 @@ class NetworkFlowDataset(InMemoryDataset):
 
         Args:
             root: Root directory for saving processed data.
-            name: Dataset name ('nsl-kdd' or 'cicids2017').
+            name: Dataset name ('nsl-kdd' or explicit CICIDS2017 variant).
             split: Dataset split ('train', 'validation', or 'test').
             transform: PyG transform to apply to data.
             pre_transform: PyG pre-transform to apply to data.
@@ -78,7 +78,8 @@ class NetworkFlowDataset(InMemoryDataset):
     @property
     def raw_dir(self) -> str:
         """Return raw data directory path."""
-        if self.name == "cicids2017":
+        # CICIDS2017 variants all store CSVs under data/raw/cicids2017
+        if self.name.startswith("cicids2017"):
             root_path = Path(self._root_path)
             parent_dir = root_path.parent
             return os.path.join(parent_dir, "raw", "cicids2017")
@@ -100,6 +101,10 @@ class NetworkFlowDataset(InMemoryDataset):
         raw_dir = Path(self.raw_dir)
         if not raw_dir.exists():
             return []
+        # If this is a CICIDS2017 variant with explicit subset mapping, only
+        # advertise the required files for that subset. Otherwise list all CSVs.
+        if self.name in CICIDS2017_SUBSETS:
+            return CICIDS2017_SUBSETS[self.name]
         return [f.name for f in sorted(raw_dir.glob("*.csv"))]
 
     @property
@@ -125,38 +130,20 @@ class NetworkFlowDataset(InMemoryDataset):
             if not success:
                 raise RuntimeError(f"Failed to download {self.name} dataset")
             logger.info(f"Successfully downloaded {self.name} dataset")
-        elif self.name == "cicids2017":
-            success = downloader.download_cicids2017(base_dir=self.raw_dir)
+        elif self.name.startswith("cicids2017"):
+            subset_name = self.name if self.name in CICIDS2017_SUBSETS else None
+            success = downloader.download_cicids2017(base_dir=self.raw_dir, subset_name=subset_name)
             if not success:
                 raise RuntimeError(
-                    f"CICIDS2017 dataset not found in {self.raw_dir}. "
-                    "Place CSV files manually under this directory."
+                    f"CICIDS2017 dataset files not found in {self.raw_dir}. "
+                    "Place required CSV files manually under this directory."
                 )
             logger.info(f"CICIDS2017 raw files verified at {self.raw_dir}")
         else:
             raise ValueError(f"Unknown dataset: {self.name}")
 
-    def _load_or_create_cicids2017_split_indices(self, n_samples: int) -> dict:
-        split_path = os.path.join(self.raw_dir, self.CICIDS2017_SPLIT_STATE_FILE)
-        if os.path.exists(split_path):
-            with open(split_path, "rb") as f:
-                logger.info(f"Loaded existing CICIDS2017 split indices from {split_path}")
-                return pickle.load(f)
-
-        indices = np.arange(n_samples)
-        rng = np.random.default_rng(42)
-        rng.shuffle(indices)
-        train_size = int(np.ceil(n_samples * 0.8))
-        split_indices = {
-            "train": indices[:train_size],
-            "test": indices[train_size:],
-        }
-
-        Path(self.raw_dir).mkdir(parents=True, exist_ok=True)
-        with open(split_path, "wb") as f:
-            pickle.dump(split_indices, f)
-        logger.info(f"Saved deterministic CICIDS2017 split indices to {split_path}")
-        return split_indices
+    # Legacy cicids2017-specific split persistence removed in favor of
+    # using `SplitManager` with explicit dataset variant names.
 
     def process(self) -> None:
         """Process raw data into PyG graph format with formal splits."""
@@ -228,28 +215,22 @@ class NetworkFlowDataset(InMemoryDataset):
                 preprocessor.load_preprocessed(preprocessor_state_path)
                 X, y = preprocessor.preprocess(df, fit=False)
                 
-        elif self.name == "cicids2017":
-            # For CICIDS2017, load all CSVs and create formal splits
+        elif self.name.startswith("cicids2017"):
+            # For CICIDS2017 variants, load explicitly selected CSVs and create formal splits
             preprocessor = CICIDS2017Preprocessor()
-            df = preprocessor.load_data(self.raw_dir)
-            
-            # Create or load splits using SplitManager
+            selected_files = None
+            if self.name in CICIDS2017_SUBSETS:
+                selected_files = CICIDS2017_SUBSETS[self.name]
+
+            df = preprocessor.load_data(self.raw_dir, selected_files=selected_files)
+
+            # Create or load splits using SplitManager (variant-specific split directory)
             split_manager = SplitManager(self.name, data_dir=split_dir)
             train_indices, val_indices, test_indices = split_manager.create_or_load_splits(
                 dataset_name=self.name,
                 train_df=df,
             )
 
-            # Persist legacy CICIDS2017 split indices for backward compatibility
-            legacy_split_path = os.path.join(self.raw_dir, self.CICIDS2017_SPLIT_STATE_FILE)
-            legacy_split_indices = {
-                "train": np.concatenate([train_indices, val_indices]),
-                "test": test_indices,
-            }
-            with open(legacy_split_path, "wb") as f:
-                pickle.dump(legacy_split_indices, f)
-            logger.info(f"Saved legacy CICIDS2017 split indices to {legacy_split_path}")
-            
             # Get the appropriate split indices
             if self.split == "train":
                 indices = train_indices
@@ -262,10 +243,10 @@ class NetworkFlowDataset(InMemoryDataset):
                 fit_preprocessor = False
             else:
                 raise ValueError(f"Invalid split: {self.split}")
-            
+
             # Apply split indices
             df_split = df.iloc[indices].reset_index(drop=True)
-            
+
             # Load or fit preprocessor
             if fit_preprocessor:
                 X, y = preprocessor.preprocess(df_split, fit=True)

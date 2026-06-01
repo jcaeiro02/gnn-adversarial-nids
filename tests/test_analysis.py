@@ -103,7 +103,7 @@ def test_analyze_cicids2017_with_inf(tmp_path):
     validation_df = train_df.iloc[[0]].reset_index(drop=True)
     
     out_dir = analyze_from_dataframes(
-        "cicids2017",
+        "cicids2017-selected",
         train_df,
         validation_df=validation_df,
         test_df=test_df,

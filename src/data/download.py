@@ -15,6 +15,26 @@ from typing import Optional, List
 logger = logging.getLogger(__name__)
 
 
+# Explicit CICIDS2017 dataset variants mapping
+# Each key maps to a list of required CSV filenames (placed under data/raw/cicids2017)
+CICIDS2017_SUBSETS = {
+    "cicids2017-ddos": [
+        "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+    ],
+    "cicids2017-portscan": [
+        "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+    ],
+    "cicids2017-patator": [
+        "Tuesday-WorkingHours.pcap_ISCX.csv",
+    ],
+    "cicids2017-selected": [
+        "Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv",
+        "Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv",
+        "Tuesday-WorkingHours.pcap_ISCX.csv",
+    ],
+}
+
+
 class DatasetDownloader:
     """Downloads and validates NSL-KDD datasets."""
 
@@ -110,22 +130,51 @@ class DatasetDownloader:
 
         return success
 
-    def download_cicids2017(self, base_dir: Optional[str] = None) -> bool:
+    def download_cicids2017(
+        self,
+        base_dir: Optional[str] = None,
+        subset_name: Optional[str] = None,
+    ) -> bool:
         """Validate manual placement of CICIDS2017 CSV files.
 
-        CICIDS2017 is not automatically downloaded from Kaggle. Users must place
-        one or more CSV files under the target directory before processing.
+        If `subset_name` is provided and matches a key in CICIDS2017_SUBSETS,
+        only the required files for that subset are validated. Otherwise any
+        CSV files present in the target directory are considered acceptable.
 
         Args:
             base_dir: Optional directory where CSV files are located.
                 If not provided, uses self.base_dir.
+            subset_name: Optional subset name to validate (e.g. 'cicids2017-ddos').
 
         Returns:
-            True if at least one CSV file exists, False otherwise.
+            True if required CSV file(s) exist, False otherwise.
         """
         target_dir = Path(base_dir) if base_dir else self.base_dir
         target_dir.mkdir(parents=True, exist_ok=True)
 
+        if subset_name:
+            required = CICIDS2017_SUBSETS.get(subset_name)
+            if required is None:
+                logger.error(f"Unknown CICIDS2017 subset: {subset_name}")
+                return False
+
+            missing = [f for f in required if not (target_dir / f).exists()]
+            if missing:
+                logger.warning(
+                    "Missing required CICIDS2017 CSV files for subset %s: %s",
+                    subset_name,
+                    missing,
+                )
+                return False
+
+            logger.info(
+                "All required CICIDS2017 CSV files for subset %s found in %s",
+                subset_name,
+                target_dir,
+            )
+            return True
+
+        # Fallback: accept any CSV files
         csv_files = list(target_dir.glob("*.csv"))
         if len(csv_files) == 0:
             logger.warning(
@@ -133,9 +182,7 @@ class DatasetDownloader:
                 "Please download the CICIDS2017 CSV files manually and place them in this directory: %s",
                 target_dir,
             )
-            logger.info(
-                "Expected path pattern: data/raw/cicids2017/*.csv"
-            )
+            logger.info("Expected path pattern: data/raw/cicids2017/*.csv")
             logger.info(
                 "Example: download CICIDS2017 from Kaggle, extract CSV files, "
                 "and copy them into the target directory."
