@@ -230,8 +230,17 @@ class TestCICIDS2017Preprocessor(unittest.TestCase):
         if self.raw_dir.exists():
             shutil.rmtree(self.raw_dir.parent)
 
-    def _write_cicids_csv(self, num_files: int = 2, rows_per_file: int = 5, include_bad_values: bool = False):
-        for file_idx in range(num_files):
+    def _write_cicids_csv(
+    self,
+    filenames=None,
+    num_files: int = 2,
+    rows_per_file: int = 5,
+    include_bad_values: bool = False,
+    ):
+        if filenames is None:
+            filenames = [f"cicids_part_{file_idx}.csv" for file_idx in range(num_files)]
+
+        for file_idx, filename in enumerate(filenames):
             rows = []
             for i in range(rows_per_file):
                 row = {
@@ -245,13 +254,15 @@ class TestCICIDS2017Preprocessor(unittest.TestCase):
                     "Tot Fwd Packets": float(i + 1),
                     "Label": "BENIGN" if i % 2 == 0 else "FTP-Patator",
                 }
+
                 if include_bad_values and i == 0:
                     row["Fwd Packet Length Mean"] = np.nan
                     row["Bwd Packet Length Mean"] = np.inf
+
                 rows.append(row)
 
             pd.DataFrame(rows).to_csv(
-                self.raw_dir / f"cicids_part_{file_idx}.csv",
+                self.raw_dir / filename,
                 index=False,
             )
 
@@ -569,32 +580,42 @@ class TestNetworkFlowDataset(unittest.TestCase):
         logger.info("✓ Dataset creation test passed")
 
     def _write_cicids2017_csv_files(
-        self,
-        filenames: Optional[list[str]] = None,
-        rows_per_file: int = 8,
+    self,
+    filenames=None,
+    rows_per_file: int = 5,
+    include_bad_values: bool = False,
     ):
-        raw_dir = Path(self.temp_dir).parent / "raw" / "cicids2017"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-
         if filenames is None:
-            filenames = [f"cicids_part_{i}.csv" for i in range(rows_per_file)]
+            filenames = ["cicids_part_0.csv", "cicids_part_1.csv"]
+
+        raw_dir = Path(self.temp_dir) / "raw"
+        raw_dir.mkdir(parents=True, exist_ok=True)
 
         for file_idx, filename in enumerate(filenames):
             rows = []
             for i in range(rows_per_file):
-                rows.append({
+                row = {
                     "Flow ID": f"flow-{file_idx}-{i}",
                     "Source IP": "192.168.0.1",
                     "Destination IP": "10.0.0.1",
                     "Timestamp": "2023-01-01 00:00:00",
                     "SimillarHTTP": "None",
-                    "Fwd Packet Length Mean": float(i) * 1.1,
-                    "Bwd Packet Length Mean": float(i) * 2.2,
+                    "Fwd Packet Length Mean": float(i) * 1.5,
+                    "Bwd Packet Length Mean": float(i) * 2.5,
                     "Tot Fwd Packets": float(i + 1),
                     "Label": "BENIGN" if i % 2 == 0 else "FTP-Patator",
-                })
+                }
 
-            pd.DataFrame(rows).to_csv(raw_dir / filename, index=False)
+                if include_bad_values and i == 0:
+                    row["Fwd Packet Length Mean"] = np.nan
+                    row["Bwd Packet Length Mean"] = np.inf
+
+                rows.append(row)
+
+            pd.DataFrame(rows).to_csv(
+                raw_dir / filename,
+                index=False,
+            )
 
         return raw_dir
 

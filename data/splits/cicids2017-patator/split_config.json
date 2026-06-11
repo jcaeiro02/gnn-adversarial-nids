@@ -1,0 +1,13 @@
+{
+  "dataset_name": "cicids2017-patator",
+  "random_state": 42,
+  "train_size": 312135,
+  "validation_size": 66887,
+  "test_size": 66887,
+  "total_size": 445909,
+  "metadata": {
+    "cicids2017_policy": "stratified_3way_split",
+    "data_source": "combined_cicids2017_csvs",
+    "indices_relative_to": "combined_dataframe"
+  }
+}

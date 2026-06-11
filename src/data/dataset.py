@@ -77,12 +77,21 @@ class NetworkFlowDataset(InMemoryDataset):
 
     @property
     def raw_dir(self) -> str:
-        """Return raw data directory path."""
-        # CICIDS2017 variants all store CSVs under data/raw/cicids2017
-        if self.name.startswith("cicids2017"):
-            root_path = Path(self._root_path)
-            parent_dir = root_path.parent
-            return os.path.join(parent_dir, "raw", "cicids2017")
+        root_path = Path(self._root_path)
+
+        # Real project structure
+        if (
+            root_path.parent.name == "graphs"
+            and root_path.parent.parent.name == "data"
+        ):
+            data_root = root_path.parent.parent
+
+            if self.name.startswith("cicids2017"):
+                return str(data_root / "raw" / "cicids2017")
+
+            return str(data_root / "raw")
+
+        # Test / temporary directories
         return os.path.join(self._root_path, "raw")
 
     @property
@@ -473,24 +482,26 @@ def load_split_datasets(
     """
     logger.info(f"Loading train, validation, and test datasets for {name}...")
 
+    dataset_root = os.path.join(root, name)
+
     train_dataset = NetworkFlowDataset.create_dataset(
         name=name,
         split="train",
-        root=root,
+        root=dataset_root,
         rebuild=rebuild,
         window_size=window_size,
     )
     validation_dataset = NetworkFlowDataset.create_dataset(
         name=name,
         split="validation",
-        root=root,
+        root=dataset_root,
         rebuild=False,
         window_size=window_size,
     )
     test_dataset = NetworkFlowDataset.create_dataset(
         name=name,
         split="test",
-        root=root,
+        root=dataset_root,
         rebuild=False,
         window_size=window_size,
     )
