@@ -189,6 +189,13 @@ def run_training(args: argparse.Namespace) -> dict:
         # Training with validation for early stopping
         fit_result = trainer.fit(train_dataset, val_dataset=val_dataset, dry_run=args.dry_run)
 
+        # Load best checkpoint for final evaluation        
+        best_checkpoint = fit_result.get("best_checkpoint")
+
+        if best_checkpoint:
+            logger.info("Loading best checkpoint for final evaluation: %s", best_checkpoint)
+            trainer.load_checkpoint(best_checkpoint)
+
         # Evaluation on all splits
         train_metrics = trainer.evaluate(train_dataset)
         val_metrics = trainer.evaluate(val_dataset)
