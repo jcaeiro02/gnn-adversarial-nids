@@ -27,7 +27,9 @@ def edge_removal_attack(
             - data.edge_attr (optional)
             - data.y
         perturbation_rate:
-            Approximate fraction of candidate edges to remove, including reverse edges.
+            Approximate fraction of candidate existing edges to remove.
+            When attack_only_malicious=True, candidate edges are those incident to
+            malicious nodes. Reverse edges are handled consistently when present.
         attack_only_malicious:
             If True, only remove edges connected to malicious nodes.
 
@@ -151,7 +153,9 @@ def edge_addition_attack(
     Args:
         data: PyTorch Geometric Data object.
         perturbation_rate:
-            Approximate fraction of total edges to add, including reverse edges.
+            Approximate fraction of the current total number of edges to add.
+            New edges originate from malicious nodes when attack_only_malicious=True.
+            Reverse edges are added consistently when the graph is treated as undirected.
         attack_only_malicious:
             If True, only create new edges incident to malicious nodes.
         avoid_duplicates:
