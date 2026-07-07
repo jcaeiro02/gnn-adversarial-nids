@@ -25,6 +25,7 @@ from training.trainer import Trainer
 
 from attacks.fgsm import fgsm_attack
 from attacks.pgd import pgd_attack
+from analysis.neighbor_churn import compute_neighbor_churn, rebuild_knn_graph
 
 
 logging.basicConfig(
@@ -101,6 +102,20 @@ def build_attacked_dataset(model, dataset, attack_name: str, epsilon: float, alp
     return attacked_graphs
 
 
+def compute_neighbor_churn_rates(clean_dataset, attacked_dataset, k: int = 5) -> list[float]:
+    churn_rates = []
+    for clean_data, attacked_data in zip(clean_dataset, attacked_dataset):
+        clean_x = clean_data.x.detach().cpu().numpy()
+        attacked_x = attacked_data.x.detach().cpu().numpy()
+
+        original_edge_index, _ = rebuild_knn_graph(clean_x, k=k, bidirectional=True)
+        attacked_edge_index, _ = rebuild_knn_graph(attacked_x, k=k, bidirectional=True)
+
+        churn_rates.append(compute_neighbor_churn(original_edge_index, attacked_edge_index))
+
+    return churn_rates
+
+
 def run_feature_attacks(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
@@ -170,6 +185,16 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
             )
 
             attacked_metrics = trainer.evaluate(attacked_dataset)
+            neighbor_churn_rates = compute_neighbor_churn_rates(test_dataset, attacked_dataset)
+            neighbor_churn_rate = float(np.mean(neighbor_churn_rates)) if neighbor_churn_rates else 0.0
+            neighbor_churn_std = float(np.std(neighbor_churn_rates)) if len(neighbor_churn_rates) > 1 else 0.0
+
+            logger.info(
+                "Average neighbor churn rate for %s epsilon=%s: %.4f",
+                attack_name,
+                epsilon,
+                neighbor_churn_rate,
+            )
 
             row = {
                 "dataset": args.dataset,
@@ -191,6 +216,8 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
                 "delta_accuracy": clean_metrics["accuracy"] - attacked_metrics["accuracy"],
                 "delta_f1": clean_metrics["f1"] - attacked_metrics["f1"],
                 "delta_recall": clean_metrics["recall"] - attacked_metrics["recall"],
+                "neighbor_churn_rate": neighbor_churn_rate,
+                "neighbor_churn_rate_std": neighbor_churn_std,
             }
 
             append_csv(row, summary_csv)
@@ -204,6 +231,8 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
                     "f1": row["delta_f1"],
                     "recall": row["delta_recall"],
                 },
+                "neighbor_churn_rate": neighbor_churn_rate,
+                "neighbor_churn_rates": neighbor_churn_rates,
             })
 
     save_json(results, run_dir / "metrics.json")
