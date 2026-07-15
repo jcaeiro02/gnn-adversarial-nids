@@ -63,9 +63,9 @@ def build_model(model_name: str, num_node_features: int, hidden_dim: int, dropou
     raise ValueError(f"Unsupported model type: {model_name}")
 
 
-def create_attack_run_directory(dataset: str, model: str, base_dir: Path = Path("results") / "structural_attacks") -> Path:
+def create_attack_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "structural_attacks") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}_structural_attacks"
+    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_structural_attacks"
     run_dir = base_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
@@ -113,6 +113,19 @@ def build_attacked_dataset(dataset, attack_name: str, rate: float, device: str):
     return attacked_graphs
 
 
+def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int) -> None:
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    metadata = checkpoint.get("metadata", {}) or {}
+    checkpoint_k = metadata.get("k")
+    if checkpoint_k is not None and int(checkpoint_k) != int(expected_k):
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} was trained with k={checkpoint_k}, but requested k={expected_k}."
+        )
+
+
 def run_structural_attacks(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
@@ -122,13 +135,14 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
     device_config = train_config.get("device", "auto")
     window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
 
-    run_dir = create_attack_run_directory(args.dataset, args.model)
+    run_dir = create_attack_run_directory(args.dataset, args.model, args.k)
 
     _, _, test_dataset = load_split_datasets(
         name=args.dataset,
         root="data/graphs",
         rebuild=False,
         window_size=window_size,
+        k=args.k,
     )
 
     num_node_features = test_dataset[0].x.shape[1]
@@ -152,6 +166,7 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
     )
 
     logger.info("Loading baseline checkpoint: %s", args.checkpoint)
+    validate_checkpoint_metadata(args.checkpoint, args.k)
     trainer.load_checkpoint(args.checkpoint)
 
     clean_metrics = trainer.evaluate(test_dataset)
@@ -161,6 +176,7 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
         "model": args.model,
         "checkpoint": str(args.checkpoint),
         "window_size": window_size,
+        "k": args.k,
         "clean_metrics": clean_metrics,
         "attacks": [],
     }
@@ -183,6 +199,7 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
             row = {
                 "dataset": args.dataset,
                 "model": args.model,
+                "k": args.k,
                 "attack": attack_name,
                 "perturbation_rate": rate,
                 "clean_accuracy": clean_metrics["accuracy"],
@@ -235,6 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--k", type=int, default=5)
 
     parser.add_argument("--attacks", nargs="+", choices=["edge_removal", "edge_addition"], default=["edge_removal", "edge_addition"])
     parser.add_argument("--rates", nargs="+", type=float, default=[0.01, 0.03, 0.05, 0.10])

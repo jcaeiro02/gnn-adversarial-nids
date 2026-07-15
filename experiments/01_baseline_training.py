@@ -13,7 +13,10 @@ from typing import Any, Dict
 
 import numpy as np
 import torch
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight test environments
+    yaml = None
 
 # Make src importable when the script is run from the repository root.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -35,7 +38,7 @@ DEFAULT_CONFIG_PATH = Path("configs/base_config.yaml")
 
 
 def load_config(config_path: Path) -> dict:
-    if not config_path.exists():
+    if not config_path.exists() or yaml is None:
         return {}
     with config_path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
@@ -88,7 +91,10 @@ def save_config_yaml(config: dict, output_dir: Path, filename: str = "config.yam
     output_dir.mkdir(parents=True, exist_ok=True)
     config_path = output_dir / filename
     with config_path.open("w", encoding="utf-8") as handle:
-        yaml.safe_dump(config, handle)
+        if yaml is None:
+            handle.write("{}\n")
+        else:
+            yaml.safe_dump(config, handle)
     return config_path
 
 
@@ -103,9 +109,9 @@ def append_csv_summary(summary: dict, output_path: Path) -> Path:
     return output_path
 
 
-def create_run_directory(dataset: str, model: str, base_dir: Path = Path("results") / "runs") -> Path:
+def create_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "runs") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}"
+    run_name = f"{timestamp}_{dataset}_{model}_k_{k}"
     run_dir = base_dir / run_name
     suffix = 0
     while run_dir.exists():
@@ -134,16 +140,16 @@ def run_training(args: argparse.Namespace) -> dict:
 
     training_config = {
         "epochs": args.epochs if args.epochs is not None else train_config.get("epochs", 100),
-        "learning_rate": train_config.get("learning_rate", 0.001),
-        "weight_decay": train_config.get("weight_decay", 0.0005),
-        "patience": train_config.get("patience", 15),
-        "batch_size": train_config.get("batch_size", 1),
-        "device": train_config.get("device", "auto"),
+        "learning_rate": args.learning_rate if args.learning_rate is not None else train_config.get("learning_rate", 0.001),
+        "weight_decay": args.weight_decay if args.weight_decay is not None else train_config.get("weight_decay", 0.0005),
+        "patience": args.patience if args.patience is not None else train_config.get("patience", 15),
+        "batch_size": args.batch_size if args.batch_size is not None else train_config.get("batch_size", 1),
+        "device": args.device if args.device is not None else train_config.get("device", "auto"),
     }
 
     window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
 
-    run_dir = create_run_directory(args.dataset, args.model)
+    run_dir = create_run_directory(args.dataset, args.model, args.k)
     run_id = run_dir.name
     timestamp = run_dir.name.split("_")[0]
 
@@ -161,6 +167,7 @@ def run_training(args: argparse.Namespace) -> dict:
                 root="data/graphs",
                 rebuild=args.rebuild_data,
                 window_size=window_size,
+                k=args.k,
             )
 
         num_node_features = (
@@ -185,6 +192,14 @@ def run_training(args: argparse.Namespace) -> dict:
             output_dir=str(run_dir),
             batch_size=training_config["batch_size"],
         )
+        trainer.metadata = {
+            "dataset": args.dataset,
+            "model": args.model,
+            "k": args.k,
+            "window_size": window_size,
+            "hidden_dim": args.hidden_dim,
+            "dropout": args.dropout,
+        }
 
         # Training with validation for early stopping
         fit_result = trainer.fit(train_dataset, val_dataset=val_dataset, dry_run=args.dry_run)
@@ -225,6 +240,7 @@ def run_training(args: argparse.Namespace) -> dict:
                 "batch_size": training_config["batch_size"],
                 "device": training_config["device"],
                 "window_size": window_size,
+                "k": args.k,
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
             },
@@ -252,6 +268,7 @@ def run_training(args: argparse.Namespace) -> dict:
             "model": args.model,
             "epochs": training_config["epochs"],
             "window_size": window_size,
+            "k": args.k,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
             "learning_rate": training_config["learning_rate"],
@@ -297,6 +314,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--window-size", type=int, default=None)
+    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--patience", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--rebuild-data", action="store_true")
@@ -306,6 +329,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.k < 1:
+        raise ValueError("--k must be at least 1")
     run_training(args)
 
 

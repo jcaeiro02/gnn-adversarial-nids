@@ -4,6 +4,7 @@ PyTorch Geometric dataset for network flow graphs.
 This module provides dataset management for preprocessed flow-centric graphs.
 """
 
+import json
 import logging
 import os
 import numpy as np
@@ -30,6 +31,7 @@ class NetworkFlowDataset(InMemoryDataset):
 
     PREPROCESSOR_STATE_FILE = "preprocessor_state.pkl"
     CICIDS2017_SPLIT_STATE_FILE = "cicids2017_split_indices.pkl"
+    CONFIG_METADATA_FILE = "config_metadata.json"
 
     def __init__(
         self,
@@ -40,6 +42,7 @@ class NetworkFlowDataset(InMemoryDataset):
         pre_transform=None,
         rebuild: bool = False,
         window_size: int = 1000,
+        k: int = 5,
     ):
         """Initialize the dataset.
 
@@ -51,16 +54,19 @@ class NetworkFlowDataset(InMemoryDataset):
             pre_transform: PyG pre-transform to apply to data.
             rebuild: Force rebuild of processed data.
             window_size: Window size for graph construction.
+            k: Number of nearest neighbors for graph construction.
         """
         self.name = name
         self.split = split
         self.rebuild = rebuild
+        self.k = k
         # Store provided root path so properties can be used before
         # PyTorch-Geometric's InMemoryDataset.__init__ sets up `self.root`.
         self._root_path = root
         self.window_size = window_size
         self.data_list = []
         self.statistics = {}
+        self.config_metadata = self._build_config_metadata()
 
         if self.rebuild:
             self._remove_processed_files()
@@ -79,25 +85,75 @@ class NetworkFlowDataset(InMemoryDataset):
     def raw_dir(self) -> str:
         root_path = Path(self._root_path)
 
-        # Real project structure
-        if (
-            root_path.parent.name == "graphs"
-            and root_path.parent.parent.name == "data"
-        ):
-            data_root = root_path.parent.parent
+        # Try to locate the repository's top-level `data` directory by
+        # walking ancestors. This ensures raw dataset files remain under
+        # `data/raw` (shared across k values) even when the dataset root
+        # includes k-specific subdirectories like `k_3`.
+        data_root = None
+        for ancestor in [root_path] + list(root_path.parents):
+            if ancestor.name == "data":
+                data_root = ancestor
+                break
 
+        if data_root is not None:
             if self.name.startswith("cicids2017"):
                 return str(data_root / "raw" / "cicids2017")
-
             return str(data_root / "raw")
 
-        # Test / temporary directories
+        # Fallback for test / temporary directories where `data` isn't found
         return os.path.join(self._root_path, "raw")
 
     @property
     def processed_dir(self) -> str:
         """Return processed data directory path."""
         return os.path.join(self._root_path, "processed")
+
+    def _build_config_metadata(self) -> dict:
+        """Create a compatibility metadata block for the current dataset config."""
+        return {
+            "dataset": self.name,
+            "split": self.split,
+            "window_size": self.window_size,
+            "k": self.k,
+            "graph_method": "knn",
+            "distance_metric": "cosine",
+        }
+
+    def _metadata_path(self) -> Path:
+        """Return the metadata file path for the current split."""
+        return (
+            Path(self.processed_dir)
+            / f"config_metadata_{self.split}.json"
+        )
+
+    def _save_config_metadata(self) -> None:
+        Path(self.processed_dir).mkdir(parents=True, exist_ok=True)
+        with open(self._metadata_path(), "w", encoding="utf-8") as handle:
+            json.dump(self.config_metadata, handle, indent=2)
+
+    def _load_config_metadata(self) -> dict:
+        metadata_path = self._metadata_path()
+        if not metadata_path.exists():
+            return {}
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _validate_processed_metadata(self) -> None:
+        metadata = self._load_config_metadata()
+        if not metadata:
+            return
+
+        mismatches = {
+            key: (metadata.get(key), self.config_metadata.get(key))
+            for key in self.config_metadata
+            if metadata.get(key) != self.config_metadata.get(key)
+        }
+
+        if mismatches:
+            raise RuntimeError(
+                f"Processed graphs at {self.processed_dir} are incompatible with the requested "
+                f"configuration: {mismatches}. Re-run with --rebuild-data to recreate them."
+            )
 
     @property
     def raw_file_names(self) -> List[str]:
@@ -299,7 +355,7 @@ class NetworkFlowDataset(InMemoryDataset):
             window_size=self.window_size,
             method="knn",
             bidirectional=True,
-            k=5,
+            k=self.k,
         )
 
         if len(graphs) == 0:
@@ -313,6 +369,8 @@ class NetworkFlowDataset(InMemoryDataset):
             "num_features": graphs[0].x.shape[1],
             "class_distribution": self._calculate_class_distribution(graphs),
         }
+
+        self._save_config_metadata()
 
         logger.info(f"Dataset statistics: {self.statistics}")
 
@@ -376,6 +434,10 @@ class NetworkFlowDataset(InMemoryDataset):
             if os.path.exists(path):
                 os.remove(path)
                 logger.info(f"Removed processed file: {path}")
+        metadata_path = self._metadata_path()
+        if metadata_path.exists():
+            metadata_path.unlink()
+            logger.info(f"Removed metadata file: {metadata_path}")
         if self.split == "train":
             preprocessor_path = os.path.join(self.processed_dir, self.PREPROCESSOR_STATE_FILE)
             if os.path.exists(preprocessor_path):
@@ -384,6 +446,8 @@ class NetworkFlowDataset(InMemoryDataset):
 
     def _load_processed_graphs(self) -> None:
         """Load processed graphs into memory from existing processed files."""
+        self._validate_processed_metadata()
+
         data_path = os.path.join(self.processed_dir, f"data_{self.split}.pt")
         if os.path.exists(data_path):
             try:
@@ -426,6 +490,7 @@ class NetworkFlowDataset(InMemoryDataset):
         root: str = "data/graphs",
         rebuild: bool = False,
         window_size: int = 1000,
+        k: int = 5,
     ) -> "NetworkFlowDataset":
         """Create a network flow dataset.
 
@@ -435,7 +500,7 @@ class NetworkFlowDataset(InMemoryDataset):
             root: Root directory for saving processed data.
             rebuild: Force rebuild of processed data.
             window_size: Window size for graph construction.
-
+            k: Number of nearest neighbors for graph construction.
         Returns:
             NetworkFlowDataset instance.
 
@@ -454,6 +519,7 @@ class NetworkFlowDataset(InMemoryDataset):
             split=split,
             rebuild=rebuild,
             window_size=window_size,
+            k=k,
         )
 
         # Load statistics
@@ -468,6 +534,7 @@ def load_split_datasets(
     root: str = "data/graphs",
     rebuild: bool = False,
     window_size: int = 1000,
+    k: int = 5,
 ) -> Tuple[NetworkFlowDataset, NetworkFlowDataset, NetworkFlowDataset]:
     """Load train, validation, and test datasets with formal split protocol.
 
@@ -476,13 +543,14 @@ def load_split_datasets(
         root: Root directory.
         rebuild: Force rebuild.
         window_size: Window size for graph construction.
+        k: Number of nearest neighbors for graph construction.
 
     Returns:
         Tuple of (train_dataset, validation_dataset, test_dataset).
     """
     logger.info(f"Loading train, validation, and test datasets for {name}...")
 
-    dataset_root = os.path.join(root, name)
+    dataset_root = os.path.join(root, name, f"k_{k}")
 
     train_dataset = NetworkFlowDataset.create_dataset(
         name=name,
@@ -490,6 +558,7 @@ def load_split_datasets(
         root=dataset_root,
         rebuild=rebuild,
         window_size=window_size,
+        k=k,
     )
     validation_dataset = NetworkFlowDataset.create_dataset(
         name=name,
@@ -497,6 +566,7 @@ def load_split_datasets(
         root=dataset_root,
         rebuild=False,
         window_size=window_size,
+        k=k,
     )
     test_dataset = NetworkFlowDataset.create_dataset(
         name=name,
@@ -504,6 +574,7 @@ def load_split_datasets(
         root=dataset_root,
         rebuild=False,
         window_size=window_size,
+        k=k,
     )
 
     logger.info(

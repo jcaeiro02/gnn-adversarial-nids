@@ -14,7 +14,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight test environments
+    yaml = None
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -38,7 +41,7 @@ DEFAULT_CONFIG_PATH = Path("configs/base_config.yaml")
 
 
 def load_config(config_path: Path) -> dict:
-    if not config_path.exists():
+    if not config_path.exists() or yaml is None:
         return {}
     with config_path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
@@ -60,9 +63,9 @@ def build_model(model_name: str, num_node_features: int, hidden_dim: int, dropou
     raise ValueError(f"Unsupported model type: {model_name}")
 
 
-def create_attack_run_directory(dataset: str, model: str, base_dir: Path = Path("results") / "feature_attacks") -> Path:
+def create_attack_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "feature_attacks") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}_feature_attacks"
+    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_feature_attacks"
     run_dir = base_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
@@ -116,6 +119,19 @@ def compute_neighbor_churn_rates(clean_dataset, attacked_dataset, k: int = 5) ->
     return churn_rates
 
 
+def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int) -> None:
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    metadata = checkpoint.get("metadata", {}) or {}
+    checkpoint_k = metadata.get("k")
+    if checkpoint_k is not None and int(checkpoint_k) != int(expected_k):
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} was trained with k={checkpoint_k}, but requested k={expected_k}."
+        )
+
+
 def run_feature_attacks(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
@@ -125,13 +141,14 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
     device_config = train_config.get("device", "auto")
     window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
 
-    run_dir = create_attack_run_directory(args.dataset, args.model)
+    run_dir = create_attack_run_directory(args.dataset, args.model, args.k)
 
     _, _, test_dataset = load_split_datasets(
         name=args.dataset,
         root="data/graphs",
         rebuild=False,
         window_size=window_size,
+        k=args.k,
     )
 
     num_node_features = test_dataset[0].x.shape[1]
@@ -155,6 +172,7 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
     )
 
     logger.info("Loading baseline checkpoint: %s", args.checkpoint)
+    validate_checkpoint_metadata(args.checkpoint, args.k)
     trainer.load_checkpoint(args.checkpoint)
 
     clean_metrics = trainer.evaluate(test_dataset)
@@ -162,6 +180,7 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
     results = {
         "dataset": args.dataset,
         "model": args.model,
+        "k": args.k,
         "checkpoint": str(args.checkpoint),
         "window_size": window_size,
         "clean_metrics": clean_metrics,
@@ -185,7 +204,7 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
             )
 
             attacked_metrics = trainer.evaluate(attacked_dataset)
-            neighbor_churn_rates = compute_neighbor_churn_rates(test_dataset, attacked_dataset)
+            neighbor_churn_rates = compute_neighbor_churn_rates(test_dataset, attacked_dataset,k=args.k)
             neighbor_churn_rate = float(np.mean(neighbor_churn_rates)) if neighbor_churn_rates else 0.0
             neighbor_churn_std = float(np.std(neighbor_churn_rates)) if len(neighbor_churn_rates) > 1 else 0.0
 
@@ -199,6 +218,7 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
             row = {
                 "dataset": args.dataset,
                 "model": args.model,
+                "k": args.k,
                 "attack": attack_name,
                 "epsilon": epsilon,
                 "alpha": args.alpha if attack_name == "pgd" else None,
@@ -257,6 +277,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=None)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--k", type=int, default=5)
 
     parser.add_argument("--attacks", nargs="+", choices=["fgsm", "pgd"], default=["fgsm", "pgd"])
     parser.add_argument("--epsilons", nargs="+", type=float, default=[0.01, 0.03, 0.05, 0.10])

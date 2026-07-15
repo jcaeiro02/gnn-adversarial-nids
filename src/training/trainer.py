@@ -41,6 +41,7 @@ class Trainer:
         self.batch_size = int(batch_size)
         self.output_dir = Path(output_dir)
         self.checkpoint_path = self.output_dir / "best_checkpoint.pt"
+        self.metadata: Dict[str, Any] = {}
 
         self.optimizer = Adam(
             self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
@@ -152,6 +153,7 @@ class Trainer:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "loss": loss,
             "metrics": metrics,
+            "metadata": self.metadata,
         }
         target_path = self.output_dir / filename
         torch.save(checkpoint, target_path)
