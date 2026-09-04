@@ -11,7 +11,6 @@ setup(
     description="Adversarial robustness analysis of flow-centric GNN-based network intrusion detection systems",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/jcaeiro02/gnn-adversarial-nids",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
