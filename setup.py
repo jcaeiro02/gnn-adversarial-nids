@@ -6,12 +6,12 @@ with open("README.md", "r", encoding="utf-8") as fh:
 setup(
     name="gnn-adversarial-nids",
     version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="GNN Adversarial Robustness for Network Intrusion Detection",
+    author="João Caeiro",
+    url="https://github.com/jcaeiro02/gnn-adversarial-nids",
+    description="Adversarial robustness analysis of flow-centric GNN-based network intrusion detection systems",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/gnn-adversarial-nids",
+    url="https://github.com/jcaeiro02/gnn-adversarial-nids",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
