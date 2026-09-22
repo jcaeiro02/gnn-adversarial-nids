@@ -26,12 +26,15 @@ def rebuild_knn_graph(
 def compute_neighbor_churn(
     original_edge_index: np.ndarray,
     attacked_edge_index: np.ndarray,
+    node_indices: np.ndarray | None = None,
 ) -> float:
     """Compute the fraction of changed neighbors between two directed graphs.
 
     The metric compares the sets of outgoing neighbors for each node in the
     original and attacked graphs and reports the fraction of neighbor slots
     that changed.
+    If node_indices is provided, the metric is computed only for those nodes.
+    Otherwise, all nodes are considered.
     """
     if original_edge_index.size == 0 and attacked_edge_index.size == 0:
         return 0.0
@@ -54,9 +57,14 @@ def compute_neighbor_churn(
     for src, dst in attacked_edge_index.T:
         attacked_neighbors[int(src)].add(int(dst))
 
+    if node_indices is None:
+        nodes_to_evaluate = range(num_nodes)
+    else:
+        nodes_to_evaluate = [int(i) for i in node_indices if int(i) < num_nodes]
+
     changed_count = 0
     total_slots = 0
-    for node_idx in range(num_nodes):
+    for node_idx in nodes_to_evaluate:
         original_slot_count = len(original_neighbors[node_idx])
         attacked_slot_count = len(attacked_neighbors[node_idx])
         total_slots += max(original_slot_count, attacked_slot_count)

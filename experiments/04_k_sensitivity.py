@@ -74,13 +74,15 @@ def create_run_directory(
     dataset: str,
     model: str,
     k_values: list[int] | None = None,
+    training_seed: int = 42,
+    attack_seed: int = 42,
     base_dir: Path = Path("results") / "k_sensitivity",
 ) -> Path:
     """Create the directory for the complete k-sensitivity experiment."""
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     k_suffix = "" if not k_values else "_" + "_".join(str(k) for k in k_values)
-    run_name = f"{timestamp}_{dataset}_{model}_k_sensitivity{k_suffix}"
+    run_name = (f"{timestamp}_{dataset}_{model}_k_sensitivity{k_suffix}" f"_training_seed_{training_seed}" f"_attack_seed_{attack_seed}")
 
     run_dir = base_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -136,6 +138,9 @@ def build_baseline_args(
         batch_size=experiment_args.batch_size,
         device=experiment_args.device,
         dry_run=experiment_args.dry_run,
+
+        seed=experiment_args.training_seed,
+        deterministic=experiment_args.deterministic,
     )
 
 
@@ -158,6 +163,10 @@ def build_feature_attack_args(
         epsilons=experiment_args.epsilons,
         alpha=experiment_args.alpha,
         steps=experiment_args.steps,
+
+        training_seed=experiment_args.training_seed,
+        attack_seed=experiment_args.attack_seed,
+        deterministic=experiment_args.deterministic,
     )
 
 
@@ -195,6 +204,9 @@ def build_summary_rows(
     k: int,
     baseline_result: dict,
     feature_result: dict,
+    training_seed: int,
+    attack_seed: int,
+    deterministic: bool,
 ) -> list[dict]:
     """Flatten results into one CSV row per attack and epsilon."""
 
@@ -208,6 +220,9 @@ def build_summary_rows(
             "k": k,
             "attack": attack_result["attack"],
             "epsilon": attack_result["epsilon"],
+            "training_seed": training_seed,
+            "attack_seed": attack_seed,
+            "deterministic": deterministic,
 
             "clean_accuracy": clean_metrics["accuracy"],
             "clean_precision": clean_metrics["precision"],
@@ -236,6 +251,20 @@ def build_summary_rows(
 
             "neighbor_churn_rate": attack_result.get("neighbor_churn_rate"),
             "neighbor_churn_rates": attack_result.get("neighbor_churn_rates"),
+
+            "malicious_neighbor_churn_rate": attack_result.get(
+                "malicious_neighbor_churn_rate"
+            ),
+            "malicious_neighbor_churn_rates": attack_result.get(
+                "malicious_neighbor_churn_rates"
+            ),
+
+            "neighbor_churn_rate_std": attack_result.get(
+                "neighbor_churn_rate_std"
+            ),
+            "malicious_neighbor_churn_rate_std": attack_result.get(
+                "malicious_neighbor_churn_rate_std"
+            ),
         }
 
         rows.append(row)
@@ -250,6 +279,8 @@ def run_k_sensitivity(args: argparse.Namespace) -> dict:
         dataset=args.dataset,
         model=args.model,
         k_values=args.k_values,
+        training_seed=args.training_seed,
+        attack_seed=args.attack_seed
     )
 
     summary_csv = experiment_dir / "k_sensitivity_summary.csv"
@@ -258,6 +289,9 @@ def run_k_sensitivity(args: argparse.Namespace) -> dict:
         "dataset": args.dataset,
         "model": args.model,
         "k_values": args.k_values,
+        "training_seed": args.training_seed,
+        "attack_seed": args.attack_seed,
+        "deterministic": args.deterministic,
         "attacks": args.attacks,
         "epsilons": args.epsilons,
         "configurations": [],
@@ -317,17 +351,6 @@ def run_k_sensitivity(args: argparse.Namespace) -> dict:
 
             continue
 
-        # Só é executado numa experiência real
-        feature_args = build_feature_attack_args(
-            experiment_args=args,
-            k=k,
-            checkpoint=checkpoint,
-        )
-
-        feature_result = FEATURE_ATTACK_MODULE.run_feature_attacks(
-            feature_args
-        )
-
 
         # --------------------------------------------------------------
         # 2. Run FGSM/PGD and neighbor-churn evaluation
@@ -364,6 +387,9 @@ def run_k_sensitivity(args: argparse.Namespace) -> dict:
             k=k,
             baseline_result=baseline_result,
             feature_result=feature_result,
+            training_seed=args.training_seed,
+            attack_seed=args.attack_seed,
+            deterministic=args.deterministic
         ):
             row = {
                 "dataset": args.dataset,
@@ -424,13 +450,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.01,
+        default=None,
+        help="PGD step size. If not provided, defaults to 2.5 * epsilon / steps.",
     )
 
     parser.add_argument(
         "--steps",
         type=int,
-        default=10,
+        default=20,
+        help="Number of PGD iterations.",
     )
 
     parser.add_argument(
@@ -507,6 +535,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use lightweight synthetic data for a smoke test.",
     )
+
+    parser.add_argument(
+    "--training-seed",
+    type=int,
+    required=True,
+    help="Seed used to train the models for all k values.",
+    )
+
+    parser.add_argument(
+        "--attack-seed",
+        type=int,
+        default=42,
+        help="Seed controlling stochastic feature attacks such as PGD random start.",
+    )
+
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Enable deterministic PyTorch operations where supported.",
+    )
+
 
     return parser.parse_args()
 

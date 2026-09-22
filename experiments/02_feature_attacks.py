@@ -55,6 +55,15 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def set_deterministic(enabled: bool) -> None:
+    if enabled:
+        torch.use_deterministic_algorithms(True)
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+
 def build_model(model_name: str, num_node_features: int, hidden_dim: int, dropout: float):
     if model_name == "gcn":
         return GCN_NIDS(num_node_features, hidden_dim, dropout=dropout)
@@ -63,9 +72,9 @@ def build_model(model_name: str, num_node_features: int, hidden_dim: int, dropou
     raise ValueError(f"Unsupported model type: {model_name}")
 
 
-def create_attack_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "feature_attacks") -> Path:
+def create_attack_run_directory(dataset: str, model: str, k: int, training_seed: int, attack_seed: int, base_dir: Path = Path("results") / "feature_attacks") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_feature_attacks"
+    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_training_seed_{training_seed}_attack_seed_{attack_seed}"
     run_dir = base_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
@@ -96,7 +105,7 @@ def build_attacked_dataset(model, dataset, attack_name: str, epsilon: float, alp
         if attack_name == "fgsm":
             adv_data = fgsm_attack(model, data, epsilon=epsilon)
         elif attack_name == "pgd":
-            adv_data = pgd_attack(model, data, epsilon=epsilon, alpha=alpha, steps=steps)
+            adv_data = pgd_attack(model, data, epsilon=epsilon, alpha=alpha, steps=steps, random_start=True)
         else:
             raise ValueError(f"Unsupported attack: {attack_name}")
 
@@ -105,8 +114,9 @@ def build_attacked_dataset(model, dataset, attack_name: str, epsilon: float, alp
     return attacked_graphs
 
 
-def compute_neighbor_churn_rates(clean_dataset, attacked_dataset, k: int = 5) -> list[float]:
-    churn_rates = []
+def compute_neighbor_churn_rates(clean_dataset, attacked_dataset, k: int = 5) -> tuple[list[float], list[float]]:
+    global_churn_rates = []
+    malicious_churn_rates = []
     for clean_data, attacked_data in zip(clean_dataset, attacked_dataset):
         clean_x = clean_data.x.detach().cpu().numpy()
         attacked_x = attacked_data.x.detach().cpu().numpy()
@@ -114,12 +124,31 @@ def compute_neighbor_churn_rates(clean_dataset, attacked_dataset, k: int = 5) ->
         original_edge_index, _ = rebuild_knn_graph(clean_x, k=k, bidirectional=True)
         attacked_edge_index, _ = rebuild_knn_graph(attacked_x, k=k, bidirectional=True)
 
-        churn_rates.append(compute_neighbor_churn(original_edge_index, attacked_edge_index))
+        # Existing global NCR
+        global_churn = compute_neighbor_churn(
+            original_edge_index,
+            attacked_edge_index,
+        )
 
-    return churn_rates
+        global_churn_rates.append(global_churn)
+
+        # Nodes directly perturbed by FGSM/PGD
+        labels = clean_data.y.detach().cpu().numpy().reshape(-1)
+        malicious_nodes = np.flatnonzero(labels == 1)
+
+        if malicious_nodes.size > 0:
+            malicious_churn = compute_neighbor_churn(
+                original_edge_index,
+                attacked_edge_index,
+                node_indices=malicious_nodes,
+            )
+
+            malicious_churn_rates.append(malicious_churn)
+
+    return global_churn_rates, malicious_churn_rates
 
 
-def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int) -> None:
+def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int, expected_seed: int) -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
@@ -131,17 +160,24 @@ def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int) -> None
             f"Checkpoint {checkpoint_path} was trained with k={checkpoint_k}, but requested k={expected_k}."
         )
 
+    checkpoint_seed = metadata.get("seed")
+    if checkpoint_seed is not None and int(checkpoint_seed) != int(expected_seed):
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} was trained with seed={checkpoint_seed}, "
+            f"but --training-seed={expected_seed}."
+        )
+
 
 def run_feature_attacks(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
-    seed = train_config.get("seed", 42)
-    set_seed(seed)
+
+    set_deterministic(args.deterministic)
 
     device_config = train_config.get("device", "auto")
-    window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
+    window_size = args.window_size if args.window_size is not None else train_config.get("window_size", 1000)
 
-    run_dir = create_attack_run_directory(args.dataset, args.model, args.k)
+    run_dir = create_attack_run_directory(args.dataset, args.model, args.k, args.training_seed, args.attack_seed)
 
     _, _, test_dataset = load_split_datasets(
         name=args.dataset,
@@ -172,15 +208,21 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
     )
 
     logger.info("Loading baseline checkpoint: %s", args.checkpoint)
-    validate_checkpoint_metadata(args.checkpoint, args.k)
+    validate_checkpoint_metadata(args.checkpoint, args.k, args.training_seed)
     trainer.load_checkpoint(args.checkpoint)
 
     clean_metrics = trainer.evaluate(test_dataset)
+
+    # Seed controlling stochastic feature attacks (PGD random start)
+    set_seed(args.attack_seed)
 
     results = {
         "dataset": args.dataset,
         "model": args.model,
         "k": args.k,
+        "training_seed": args.training_seed,
+        "attack_seed": args.attack_seed,
+        "deterministic": args.deterministic,
         "checkpoint": str(args.checkpoint),
         "window_size": window_size,
         "clean_metrics": clean_metrics,
@@ -204,9 +246,12 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
             )
 
             attacked_metrics = trainer.evaluate(attacked_dataset)
-            neighbor_churn_rates = compute_neighbor_churn_rates(test_dataset, attacked_dataset,k=args.k)
-            neighbor_churn_rate = float(np.mean(neighbor_churn_rates)) if neighbor_churn_rates else 0.0
-            neighbor_churn_std = float(np.std(neighbor_churn_rates)) if len(neighbor_churn_rates) > 1 else 0.0
+
+            global_churn_rates, malicious_churn_rates = compute_neighbor_churn_rates(test_dataset,attacked_dataset,k=args.k)
+            neighbor_churn_rate = (float(np.mean(global_churn_rates)) if global_churn_rates else 0.0)
+            neighbor_churn_std = (float(np.std(global_churn_rates))if len(global_churn_rates) > 1 else 0.0)
+            malicious_neighbor_churn_rate = (float(np.mean(malicious_churn_rates)) if malicious_churn_rates else 0.0)
+            malicious_neighbor_churn_std = (float(np.std(malicious_churn_rates)) if len(malicious_churn_rates) > 1 else 0.0)
 
             logger.info(
                 "Average neighbor churn rate for %s epsilon=%s: %.4f",
@@ -215,14 +260,31 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
                 neighbor_churn_rate,
             )
 
+            logger.info(
+                "Average malicious-node neighbor churn rate for %s epsilon=%s: %.4f",
+                attack_name,
+                epsilon,
+                malicious_neighbor_churn_rate,
+            )
+
+            effective_alpha = (
+                args.alpha if args.alpha is not None
+                else 2.5 * epsilon / args.steps
+            ) if attack_name == "pgd" else None
+
+
             row = {
                 "dataset": args.dataset,
                 "model": args.model,
                 "k": args.k,
                 "attack": attack_name,
                 "epsilon": epsilon,
-                "alpha": args.alpha if attack_name == "pgd" else None,
+                "alpha": effective_alpha,
                 "steps": args.steps if attack_name == "pgd" else None,
+                "training_seed": args.training_seed,
+                "attack_seed": args.attack_seed,
+                "deterministic": args.deterministic,
+                "checkpoint": str(args.checkpoint),
                 "clean_accuracy": clean_metrics["accuracy"],
                 "clean_precision": clean_metrics["precision"],
                 "clean_recall": clean_metrics["recall"],
@@ -238,6 +300,8 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
                 "delta_recall": clean_metrics["recall"] - attacked_metrics["recall"],
                 "neighbor_churn_rate": neighbor_churn_rate,
                 "neighbor_churn_rate_std": neighbor_churn_std,
+                "malicious_neighbor_churn_rate": malicious_neighbor_churn_rate,
+                "malicious_neighbor_churn_rate_std": malicious_neighbor_churn_std,
             }
 
             append_csv(row, summary_csv)
@@ -245,6 +309,9 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
             results["attacks"].append({
                 "attack": attack_name,
                 "epsilon": epsilon,
+                "alpha": effective_alpha,
+                "steps": args.steps if attack_name == "pgd" else None,
+                "random_start": True if attack_name == "pgd" else None,
                 "metrics": attacked_metrics,
                 "delta": {
                     "accuracy": row["delta_accuracy"],
@@ -252,7 +319,11 @@ def run_feature_attacks(args: argparse.Namespace) -> dict:
                     "recall": row["delta_recall"],
                 },
                 "neighbor_churn_rate": neighbor_churn_rate,
-                "neighbor_churn_rates": neighbor_churn_rates,
+                "neighbor_churn_rate_std": neighbor_churn_std,
+                "neighbor_churn_rates": global_churn_rates,
+                "malicious_neighbor_churn_rate": malicious_neighbor_churn_rate,
+                "malicious_neighbor_churn_rate_std": malicious_neighbor_churn_std,
+                "malicious_neighbor_churn_rates": malicious_churn_rates,
             })
 
     save_json(results, run_dir / "metrics.json")
@@ -282,8 +353,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attacks", nargs="+", choices=["fgsm", "pgd"], default=["fgsm", "pgd"])
     parser.add_argument("--epsilons", nargs="+", type=float, default=[0.01, 0.03, 0.05, 0.10])
 
-    parser.add_argument("--alpha", type=float, default=0.01)
-    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--alpha", type=float, default=None, help="PGD step size. If not provided, defaults to 2.5 * epsilon / steps.")
+    parser.add_argument("--steps", type=int, default=20, help="Number of PGD iterations.")
+
+    parser.add_argument("--training-seed", type=int, required=True, help="Seed used to train the checkpoint being evaluated.")
+
+    parser.add_argument("--attack-seed", type=int, default=42, help="Seed controlling stochastic feature attacks such as PGD random start.")
+
+    parser.add_argument("--deterministic", action="store_true", help="Enable deterministic PyTorch operations where supported.")
 
     return parser.parse_args()
 
