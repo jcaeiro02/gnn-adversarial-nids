@@ -1,7 +1,7 @@
 # experiments/03_structural_attacks.py
 
 #!/usr/bin/env python3
-"""Strucural-space adversarial attacks against trained GNN-NIDS baselines."""
+"""Random structural perturbations against trained GNN-NIDS baselines."""
 
 import argparse
 import csv
@@ -63,9 +63,10 @@ def build_model(model_name: str, num_node_features: int, hidden_dim: int, dropou
     raise ValueError(f"Unsupported model type: {model_name}")
 
 
-def create_attack_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "structural_attacks") -> Path:
+def create_attack_run_directory(dataset: str, model: str, k: int, training_seed: int, perturbation_seed: int, base_dir: Path = Path("results") / "structural_attacks") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_structural_attacks"
+    run_name = (f"{timestamp}_{dataset}_{model}_k_{k}_structural_attacks" f"_trainseed_{training_seed}" f"_pertseed_{perturbation_seed}")
+
     run_dir = base_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     return run_dir
@@ -113,29 +114,48 @@ def build_attacked_dataset(dataset, attack_name: str, rate: float, device: str):
     return attacked_graphs
 
 
-def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int) -> None:
+def validate_checkpoint_metadata(checkpoint_path: Path, expected_k: int, expected_seed: int) -> None:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     metadata = checkpoint.get("metadata", {}) or {}
     checkpoint_k = metadata.get("k")
+    checkpoint_seed = metadata.get("seed")
     if checkpoint_k is not None and int(checkpoint_k) != int(expected_k):
         raise ValueError(
             f"Checkpoint {checkpoint_path} was trained with k={checkpoint_k}, but requested k={expected_k}."
         )
+    if checkpoint_seed is not None and int(checkpoint_seed) != int(expected_seed):
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} was trained with seed={checkpoint_seed}, but --training-seed={expected_seed}."
+        )
+
+def set_deterministic(enabled: bool) -> None:
+    if enabled:
+        torch.use_deterministic_algorithms(True)
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
 
 def run_structural_attacks(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
-    seed = train_config.get("seed", 42)
-    set_seed(seed)
+
+    set_deterministic(args.deterministic)
 
     device_config = train_config.get("device", "auto")
-    window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
+    window_size = args.window_size if args.window_size is not None else train_config.get("window_size", 1000)
 
-    run_dir = create_attack_run_directory(args.dataset, args.model, args.k)
+    run_dir = create_attack_run_directory(
+        dataset=args.dataset,
+        model=args.model,
+        k=args.k,
+        training_seed=args.training_seed,
+        perturbation_seed=args.perturbation_seed
+    )
 
     _, _, test_dataset = load_split_datasets(
         name=args.dataset,
@@ -166,15 +186,21 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
     )
 
     logger.info("Loading baseline checkpoint: %s", args.checkpoint)
-    validate_checkpoint_metadata(args.checkpoint, args.k)
+    validate_checkpoint_metadata(args.checkpoint, args.k, args.training_seed)
     trainer.load_checkpoint(args.checkpoint)
 
     clean_metrics = trainer.evaluate(test_dataset)
+
+    # Seed used for the random structural perturbation.
+    set_seed(args.perturbation_seed)
 
     results = {
         "dataset": args.dataset,
         "model": args.model,
         "checkpoint": str(args.checkpoint),
+        "training_seed": args.training_seed,
+        "perturbation_seed": args.perturbation_seed,
+        "deterministic": args.deterministic,
         "window_size": window_size,
         "k": args.k,
         "clean_metrics": clean_metrics,
@@ -185,7 +211,7 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
 
     for attack_name in args.attacks:
         for rate in args.rates:
-            logger.info("Running %s attack with perturbation_rate=%s", attack_name, rate)
+            logger.info("Running %s perturbation at rate=%s", attack_name, rate)
 
             attacked_dataset = build_attacked_dataset(
                 dataset=test_dataset,
@@ -200,6 +226,9 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
                 "dataset": args.dataset,
                 "model": args.model,
                 "k": args.k,
+                "training_seed": args.training_seed,
+                "perturbation_seed": args.perturbation_seed,
+                "deterministic": args.deterministic,
                 "attack": attack_name,
                 "perturbation_rate": rate,
                 "clean_accuracy": clean_metrics["accuracy"],
@@ -237,7 +266,7 @@ def run_structural_attacks(args: argparse.Namespace) -> dict:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run structural edge perturbation attacks on trained GNN baselines.")
+    parser = argparse.ArgumentParser(description="Evaluate random structural perturbations against trained GNN-NIDS baselines.")
 
     parser.add_argument("--model", choices=["gcn", "gat"], default="gcn")
 
@@ -255,7 +284,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=5)
 
     parser.add_argument("--attacks", nargs="+", choices=["edge_removal", "edge_addition"], default=["edge_removal", "edge_addition"])
-    parser.add_argument("--rates", nargs="+", type=float, default=[0.01, 0.03, 0.05, 0.10])
+    parser.add_argument("--rates", nargs="+", type=float, default=[0.05, 0.10, 0.20, 0.30])
+
+    parser.add_argument("--training-seed", type=int, required=True, help="Seed used to train the checkpoint being evaluated.")
+    parser.add_argument("--perturbation-seed", type=int, required=True, help="Seed controlling the random structural perturbation.")
+
+    parser.add_argument("--deterministic", action="store_true", help="Enable deterministic PyTorch operations where supported.")
 
     return parser.parse_args()
 

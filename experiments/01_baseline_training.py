@@ -109,9 +109,9 @@ def append_csv_summary(summary: dict, output_path: Path) -> Path:
     return output_path
 
 
-def create_run_directory(dataset: str, model: str, k: int, base_dir: Path = Path("results") / "runs") -> Path:
+def create_run_directory(dataset: str, model: str, k: int, seed: int, base_dir: Path = Path("results") / "runs") -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{timestamp}_{dataset}_{model}_k_{k}"
+    run_name = f"{timestamp}_{dataset}_{model}_k_{k}_seed_{seed}"
     run_dir = base_dir / run_name
     suffix = 0
     while run_dir.exists():
@@ -131,11 +131,22 @@ def setup_training_log(run_dir: Path) -> logging.Handler:
     root_logger.addHandler(handler)
     return handler
 
+def set_deterministic(enabled: bool) -> None:
+    if enabled:
+        torch.use_deterministic_algorithms(True)
+
+        if torch.cuda.is_available():
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
 
 def run_training(args: argparse.Namespace) -> dict:
     config = load_config(DEFAULT_CONFIG_PATH)
     train_config = config.get("train", config)
-    seed = train_config.get("seed", 42)
+
+    seed = args.seed if args.seed is not None else train_config.get("seed", 42)
+
+    set_deterministic(args.deterministic)
     set_seed(seed)
 
     training_config = {
@@ -147,9 +158,9 @@ def run_training(args: argparse.Namespace) -> dict:
         "device": args.device if args.device is not None else train_config.get("device", "auto"),
     }
 
-    window_size = args.window_size if args.window_size is not None else config.get("window_size", 1000)
+    window_size = (args.window_size if args.window_size is not None else train_config.get("window_size", 1000))
 
-    run_dir = create_run_directory(args.dataset, args.model, args.k)
+    run_dir = create_run_directory(args.dataset, args.model, args.k, seed)
     run_id = run_dir.name
     timestamp = run_dir.name.split("_")[0]
 
@@ -196,6 +207,8 @@ def run_training(args: argparse.Namespace) -> dict:
             "dataset": args.dataset,
             "model": args.model,
             "k": args.k,
+            "seed": seed,
+            "deterministic": args.deterministic,
             "window_size": window_size,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
@@ -241,6 +254,8 @@ def run_training(args: argparse.Namespace) -> dict:
                 "device": training_config["device"],
                 "window_size": window_size,
                 "k": args.k,
+                "seed": seed,
+                "deterministic": args.deterministic,
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
             },
@@ -269,6 +284,8 @@ def run_training(args: argparse.Namespace) -> dict:
             "epochs": training_config["epochs"],
             "window_size": window_size,
             "k": args.k,
+            "seed": seed,
+            "deterministic": args.deterministic,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,
             "learning_rate": training_config["learning_rate"],
@@ -324,6 +341,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--rebuild-data", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--seed", type=int, default=None, help="Training seed. Overrides the seed defined in base_config.yaml.")
+    parser.add_argument("--deterministic", action="store_true", help="Enable deterministic PyTorch operations where supported.")
     return parser.parse_args()
 
 

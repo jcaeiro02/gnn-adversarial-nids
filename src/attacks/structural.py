@@ -1,13 +1,66 @@
 """
-Structural adversarial attacks for PyTorch Geometric graphs.
+Random structural perturbations for PyTorch Geometric graphs.
 
-This module implements topology-based evasion attacks by perturbing the graph
+This module implements topology-based perturbations by modifying the graph
 structure (edge_index) while preserving node features.
+
+The implemented perturbations are random rather than optimised adversarial
+attacks. When attack_only_malicious=True, perturbations are restricted to
+connections involving malicious nodes.
 """
 
 import torch
 from torch_geometric.data import Data
 from torch.nn.functional import cosine_similarity
+
+
+def _get_candidate_pairs(
+    data: Data,
+    attack_only_malicious: bool,
+):
+    """
+    Return the set of unique undirected existing edge pairs that define
+    the perturbation budget.
+
+    When attack_only_malicious=True, only edges incident to at least one
+    malicious node are considered.
+    """
+
+    edge_index = data.edge_index
+
+    src = edge_index[0]
+    dst = edge_index[1]
+
+    if attack_only_malicious:
+        node_mask = data.y == 1
+
+        if node_mask.sum() == 0:
+            return set()
+
+        candidate_mask = node_mask[src] | node_mask[dst]
+    else:
+        candidate_mask = torch.ones(
+            edge_index.size(1),
+            dtype=torch.bool,
+            device=edge_index.device,
+        )
+
+    candidate_edges = edge_index[:, candidate_mask]
+
+    candidate_pairs = set()
+
+    for i in range(candidate_edges.size(1)):
+        u = int(candidate_edges[0, i].item())
+        v = int(candidate_edges[1, i].item())
+
+        if u == v:
+            continue
+
+        # Canonical representation of an undirected edge
+        pair = (min(u, v), max(u, v))
+        candidate_pairs.add(pair)
+
+    return candidate_pairs
 
 
 def edge_removal_attack(
@@ -16,43 +69,34 @@ def edge_removal_attack(
     attack_only_malicious: bool = True,
 ) -> Data:
     """
-    Apply a structural edge removal attack.
+    Apply random structural edge removal.
 
-    Randomly removes a percentage of graph edges. Optionally restricts the
-    perturbation to edges incident to malicious nodes.
+    A fraction of existing unique edge pairs is randomly removed.
+    When attack_only_malicious=True, the perturbation budget is defined
+    over existing edges incident to malicious nodes.
 
     Args:
-        data: PyTorch Geometric Data object containing:
-            - data.edge_index
-            - data.edge_attr (optional)
-            - data.y
+        data:
+            PyTorch Geometric Data object.
+
         perturbation_rate:
-            Approximate fraction of candidate existing edges to remove.
-            When attack_only_malicious=True, candidate edges are those incident to
-            malicious nodes. Reverse edges are handled consistently when present.
+            Fraction of candidate undirected edge pairs to remove.
+
         attack_only_malicious:
-            If True, only remove edges connected to malicious nodes.
+            If True, only edges incident to malicious nodes are candidates.
 
     Returns:
-        A new PyTorch Geometric Data object with a perturbed edge_index.
+        A cloned Data object with the selected edges removed.
 
     Raises:
         ValueError:
-            If perturbation_rate is outside (0,1].
+            If perturbation_rate is outside (0, 1].
     """
-
-    # ------------------------------------------------------------------
-    # Validate parameters
-    # ------------------------------------------------------------------
 
     if perturbation_rate <= 0 or perturbation_rate > 1:
         raise ValueError(
             f"perturbation_rate must be in (0,1], got {perturbation_rate}"
         )
-
-    # ------------------------------------------------------------------
-    # Clone graph
-    # ------------------------------------------------------------------
 
     data_adv = data.clone()
 
@@ -62,76 +106,54 @@ def edge_removal_attack(
     if hasattr(data, "edge_attr") and data.edge_attr is not None:
         edge_attr = data.edge_attr.clone()
 
-    # Identify candidate edges for removal
-    if attack_only_malicious:
-        node_mask = data.y == 1
+    # --------------------------------------------------------------
+    # Candidate existing edge pairs
+    # --------------------------------------------------------------
 
-        if node_mask.sum() == 0:
-            return data_adv
-
-        src = edge_index[0]
-        dst = edge_index[1]
-
-        candidate_edges = node_mask[src] | node_mask[dst]
-    else:
-        candidate_edges = torch.ones(
-            edge_index.size(1),
-            dtype=torch.bool,
-            device=edge_index.device
+    candidate_pairs = list(
+        _get_candidate_pairs(
+            data,
+            attack_only_malicious=attack_only_malicious,
         )
+    )
 
-    # Get indices of candidate edges
-    candidate_idx = candidate_edges.nonzero(as_tuple=False).view(-1)
-
-    # If there are no candidate edges, return original graph
-    if candidate_idx.numel() == 0:
+    if len(candidate_pairs) == 0:
         return data_adv
 
-    # Number of edges to remove.
-    # Candidate edges include both directions.
-    # Remove only half so that removing reverse edges results in approximately perturbation_rate.  
-    num_remove = int((candidate_idx.numel() * perturbation_rate) / 2)
-
-    # Guarantee at least 1 edge is removed
+    # Number of unique undirected connections to remove
+    num_remove = int(len(candidate_pairs) * perturbation_rate)
     num_remove = max(1, num_remove)
+    num_remove = min(num_remove, len(candidate_pairs))
 
-    # Randomly select candidate edges to remove
-    random_order = torch.randperm(candidate_idx.numel(), device=edge_index.device)
-    remove_idx = candidate_idx[random_order[:num_remove]]
+    # Randomly select connections
+    random_order = torch.randperm(len(candidate_pairs))
 
-    # Also remove reverse edges to preserve bidirectional consistency
-    edges_to_remove = set()
+    selected_pairs = {
+        candidate_pairs[int(i)]
+        for i in random_order[:num_remove]
+    }
 
-    for idx in remove_idx:
-        idx = int(idx.item())
+    # --------------------------------------------------------------
+    # Remove both directed representations of each selected pair
+    # --------------------------------------------------------------
 
-        src = int(edge_index[0, idx].item())
-        dst = int(edge_index[1, idx].item())
-
-        edges_to_remove.add((src, dst))
-        edges_to_remove.add((dst, src))
-
-
-    # Create keep mask: start by keeping all edges
-    # keep_edges = [True, True, True, True, True]
     keep_edges = torch.ones(
         edge_index.size(1),
         dtype=torch.bool,
-        device=edge_index.device
+        device=edge_index.device,
     )
 
-    # Mark selected edges and their reverse counterparts for removal
     for i in range(edge_index.size(1)):
-        src = int(edge_index[0, i].item())
-        dst = int(edge_index[1, i].item())
+        u = int(edge_index[0, i].item())
+        v = int(edge_index[1, i].item())
 
-        if (src, dst) in edges_to_remove:
+        pair = (min(u, v), max(u, v))
+
+        if pair in selected_pairs:
             keep_edges[i] = False
 
-    # Apply mask to edge_index
     data_adv.edge_index = edge_index[:, keep_edges]
 
-    # Apply same mask to edge_attr, if it exists
     if edge_attr is not None:
         data_adv.edge_attr = edge_attr[keep_edges]
 
@@ -145,42 +167,40 @@ def edge_addition_attack(
     avoid_duplicates: bool = True,
 ) -> Data:
     """
-    Apply a structural edge addition attack.
+    Apply random structural edge addition.
 
-    Randomly inserts new edges into the graph. Optionally restricts new
-    connections to malicious nodes.
+    New connections are randomly created while using the same perturbation
+    budget definition as edge removal.
+
+    When attack_only_malicious=True, the perturbation budget is calculated
+    from the number of existing edges incident to malicious nodes, and new
+    connections originate from malicious nodes.
 
     Args:
-        data: PyTorch Geometric Data object.
+        data:
+            PyTorch Geometric Data object.
+
         perturbation_rate:
-            Approximate fraction of the current total number of edges to add.
-            New edges originate from malicious nodes when attack_only_malicious=True.
-            Reverse edges are added consistently when the graph is treated as undirected.
+            Fraction of the baseline candidate edge count to add.
+
         attack_only_malicious:
-            If True, only create new edges incident to malicious nodes.
+            If True, new connections originate from malicious nodes.
+
         avoid_duplicates:
-            Prevent insertion of existing edges.
+            If True, existing connections cannot be added again.
 
     Returns:
-        A new PyTorch Geometric Data object with additional edges.
+        A cloned Data object with additional bidirectional edges.
 
     Raises:
         ValueError:
-            If perturbation_rate is outside (0,1].
+            If perturbation_rate is outside (0, 1].
     """
-
-    # ------------------------------------------------------------------
-    # Validate parameters
-    # ------------------------------------------------------------------
 
     if perturbation_rate <= 0 or perturbation_rate > 1:
         raise ValueError(
             f"perturbation_rate must be in (0,1], got {perturbation_rate}"
         )
-
-    # ------------------------------------------------------------------
-    # Clone graph
-    # ------------------------------------------------------------------
 
     data_adv = data.clone()
 
@@ -190,41 +210,73 @@ def edge_addition_attack(
     if hasattr(data, "edge_attr") and data.edge_attr is not None:
         edge_attr = data.edge_attr.clone()
 
-    # Identify candidate source nodes
+    # --------------------------------------------------------------
+    # Define source nodes
+    # --------------------------------------------------------------
+
     if attack_only_malicious:
         node_mask = data.y == 1
 
         if node_mask.sum() == 0:
             return data_adv
-        
-        source_nodes = node_mask.nonzero(as_tuple=False).view(-1)
+
+        source_nodes = node_mask.nonzero(
+            as_tuple=False
+        ).view(-1)
+
     else:
-        source_nodes = torch.arange(data.num_nodes, device=data.edge_index.device)
+        source_nodes = torch.arange(
+            data.num_nodes,
+            device=edge_index.device,
+        )
 
-    # Number of directed edge pairs to add
-    num_add = int((edge_index.size(1) * perturbation_rate) / 2)
-    num_add = max(1, num_add)
-
-    # All nodes are possible destinations
     destination_nodes = torch.arange(
         data.num_nodes,
-        device=edge_index.device
+        device=edge_index.device,
     )
 
-    # Store existing edges to avoid duplicates
-    existing_edges = set()
-    if avoid_duplicates:
-        for i in range(edge_index.size(1)):
-            src = int(edge_index[0, i].item())
-            dst = int(edge_index[1, i].item())
-            existing_edges.add((src, dst))
+    # --------------------------------------------------------------
+    # Use the SAME denominator as edge removal
+    # --------------------------------------------------------------
 
-    # Generate new valid edges
-    new_edges_list = []
-    max_attempts = num_add * 10
+    candidate_pairs = _get_candidate_pairs(
+        data,
+        attack_only_malicious=attack_only_malicious,
+    )
+
+    if len(candidate_pairs) == 0:
+        return data_adv
+
+    num_add = int(len(candidate_pairs) * perturbation_rate)
+    num_add = max(1, num_add)
+
+    # --------------------------------------------------------------
+    # Existing undirected connections
+    # --------------------------------------------------------------
+
+    existing_pairs = set()
+
+    for i in range(edge_index.size(1)):
+        u = int(edge_index[0, i].item())
+        v = int(edge_index[1, i].item())
+
+        if u == v:
+            continue
+
+        existing_pairs.add(
+            (min(u, v), max(u, v))
+        )
+
+    # --------------------------------------------------------------
+    # Generate new connections
+    # --------------------------------------------------------------
+
+    new_pairs = set()
+
+    max_attempts = max(num_add * 20, 100)
     attempts = 0
 
-    while len(new_edges_list) < num_add and attempts < max_attempts:
+    while len(new_pairs) < num_add and attempts < max_attempts:
         attempts += 1
 
         src_pos = torch.randint(
@@ -233,7 +285,6 @@ def edge_addition_attack(
             (1,),
             device=edge_index.device,
         )
-        src = int(source_nodes[src_pos].item())
 
         dst_pos = torch.randint(
             0,
@@ -241,43 +292,58 @@ def edge_addition_attack(
             (1,),
             device=edge_index.device,
         )
+
+        src = int(source_nodes[src_pos].item())
         dst = int(destination_nodes[dst_pos].item())
 
         # Avoid self-loops
         if src == dst:
             continue
 
-        edge = (src, dst)
-        reverse_edge = (dst, src)
+        pair = (min(src, dst), max(src, dst))
 
-        # Avoid duplicate edges
-        if avoid_duplicates and (edge in existing_edges or reverse_edge in existing_edges):
+        # Avoid existing connections
+        if avoid_duplicates and pair in existing_pairs:
             continue
 
-        new_edges_list.append(edge)
+        # Avoid adding the same new connection twice
+        if pair in new_pairs:
+            continue
 
-        if avoid_duplicates:
-            existing_edges.add(edge)
-            existing_edges.add(reverse_edge)
+        new_pairs.add(pair)
 
-    if len(new_edges_list) == 0:
-        return data_adv
+    # Verify that the requested perturbation budget was achieved
+    if len(new_pairs) < num_add:
+        raise RuntimeError(
+            f"Could only add {len(new_pairs)} of "
+            f"{num_add} requested logical edges."
+        )
 
-    # Convert list of edges to PyG edge_index format [2, num_new_edges]
+    # --------------------------------------------------------------
+    # Convert new pairs into bidirectional PyG edges
+    # --------------------------------------------------------------
+
+    new_edges_list = []
+
+    for u, v in new_pairs:
+        new_edges_list.append((u, v))
+        new_edges_list.append((v, u))
+
     new_edges = torch.tensor(
         new_edges_list,
         dtype=torch.long,
         device=edge_index.device,
     ).t().contiguous()
 
-    # Add reverse edges to preserve the bidirectional graph structure
-    reverse_edges = new_edges.flip(0)
-    new_edges = torch.cat([new_edges, reverse_edges], dim=1)
+    data_adv.edge_index = torch.cat(
+        [edge_index, new_edges],
+        dim=1,
+    )
 
-    # Add new edges to graph
-    data_adv.edge_index = torch.cat([edge_index, new_edges], dim=1)
+    # --------------------------------------------------------------
+    # Edge attributes for new connections
+    # --------------------------------------------------------------
 
-    # Compute edge_attr for new edges using cosine similarity
     if edge_attr is not None:
         new_src = new_edges[0]
         new_dst = new_edges[1]
@@ -289,7 +355,10 @@ def edge_addition_attack(
         ).view(-1, 1)
 
         data_adv.edge_attr = torch.cat(
-            [edge_attr, new_edge_attr.to(edge_attr.dtype)],
+            [
+                edge_attr,
+                new_edge_attr.to(edge_attr.dtype),
+            ],
             dim=0,
         )
 
